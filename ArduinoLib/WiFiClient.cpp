@@ -6,8 +6,8 @@
 #include "IPAddress.h"
 #include "WiFiClient.h"
 
-// set for core info
-static bool _trace_client = false;
+// set for more verbose info
+static int _trace_client = 0;
 
 // default constructor
 WiFiClient::WiFiClient()
@@ -117,7 +117,7 @@ bool WiFiClient::connect(const char *host, int port)
         memset (&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
-        sprintf (port_str, "%d", port);
+        snprintf (port_str, sizeof(port_str), "%d", port);
         int error = ::getaddrinfo (host, port_str, &hints, &aip);
         if (error) {
             printf ("WiFiCl: getaddrinfo(%s:%d): %s\n", host, port, gai_strerror(error));
@@ -134,7 +134,7 @@ bool WiFiClient::connect(const char *host, int port)
 
         /* connect */
         if (connect_to (sockfd, aip->ai_addr, aip->ai_addrlen, 5000) < 0) {
-            printf ("WiFiCl: connect(%s,%d): %s\n", host,port,strerror(errno));
+            printf ("WiFiCl: connect(%s:%d): %s\n", host, port, strerror(errno));
             freeaddrinfo (aip);
             close (sockfd);
             return (false);
@@ -213,17 +213,19 @@ int WiFiClient::available()
             return (0);
 
         // read more
-	int n = ::read(socket, peek, sizeof(peek));
-	if (n > 0) {
-	    n_peek = n;
+	int nr = ::read(socket, peek, sizeof(peek));
+	if (nr > 0) {
+            if (_trace_client > 1)
+                printf ("WiFiCl: read(%d) %d\n", socket, nr);
+	    n_peek = nr;
             next_peek = 0;
 	    return (1);
 	} else {
-            if (n == 0) {
+            if (nr == 0) {
                 if (_trace_client)
-                    printf ("WiFiCl: fd %d read EOF\n", socket);
+                    printf ("WiFiCl: read(%d) EOF\n", socket);
             } else
-                printf ("WiFiCl: fd %d read err: %s\n", socket, strerror(errno));
+                printf ("WiFiCl: read(%d): %s\n", socket, strerror(errno));
 	    stop();
 	    return (0);
 	}
@@ -248,14 +250,14 @@ int WiFiClient::write (const uint8_t *buf, int n)
 	    if (nw < 0) {
                 // select says it won't block but it still might be temporarily EAGAIN
                 if (errno != EAGAIN) {
-                    printf ("WiFiCl: write fd %d: %s\n", socket, strerror(errno));
+                    printf ("WiFiCl: write(%d): %s\n", socket, strerror(errno));
                     stop();             // avoid repeated failed attempts
                     return (0);
                 } else
                     nw = 0;             // act like nothing happened
 	    }
-	    if (_trace_client) {
-                printf ("WiFiCl: write %d to fd %d: ", nw, socket);
+	    if (_trace_client > 1) {
+                printf ("WiFiCl: write(%d) %d: ", socket, nw);
                 bool all_printable = true;
                 for (int i = 0; i < nw; i++) {
                     if (!isprint(buf[ntot+i])) {
@@ -284,17 +286,22 @@ void WiFiClient::print (String s)
 	write (sp, n);
 }
 
+void WiFiClient::print (const char *str)
+{
+	write ((const uint8_t *) str, strlen(str));
+}
+
 void WiFiClient::print (float f)
 {
 	char buf[32];
-	int n = sprintf (buf, "%g", f);
+	int n = snprintf (buf, sizeof(buf), "%g", f);
 	write ((const uint8_t *) buf, n);
 }
 
 void WiFiClient::print (float f, int s)
 {
 	char buf[32];
-	int n = sprintf (buf, "%.*f", s, f);
+	int n = snprintf (buf, sizeof(buf), "%.*f", s, f);
 	write ((const uint8_t *) buf, n);
 }
 
@@ -311,43 +318,50 @@ void WiFiClient::println (String s)
 	write ((const uint8_t *) "\r\n", 2);
 }
 
+void WiFiClient::println (const char *str)
+{
+	write ((const uint8_t *) str, strlen(str));
+	write ((const uint8_t *) "\r\n", 2);
+}
+
 void WiFiClient::println (float f)
 {
 	char buf[32];
-	int n = sprintf (buf, "%g\r\n", f);
+	int n = snprintf (buf, sizeof(buf), "%g\r\n", f);
 	write ((const uint8_t *) buf, n);
 }
 
 void WiFiClient::println (float f, int s)
 {
 	char buf[32];
-	int n = sprintf (buf, "%.*f\r\n", s, f);
+	int n = snprintf (buf, sizeof(buf), "%.*f\r\n", s, f);
 	write ((const uint8_t *) buf, n);
 }
 
 void WiFiClient::println (int i)
 {
 	char buf[32];
-	int n = sprintf (buf, "%d\r\n", i);
+	int n = snprintf (buf, sizeof(buf), "%d\r\n", i);
 	write ((const uint8_t *) buf, n);
 }
 
 void WiFiClient::println (uint32_t i)
 {
 	char buf[32];
-	int n = sprintf (buf, "%u\r\n", i);
+	int n = snprintf (buf, sizeof(buf), "%u\r\n", i);
 	write ((const uint8_t *) buf, n);
 }
 
-String WiFiClient::remoteIP()
+IPAddress WiFiClient::remoteIP()
 {
 	struct sockaddr_in sa;
 	socklen_t len = sizeof(sa);
 
 	getpeername(socket, (struct sockaddr *)&sa, &len);
-	struct in_addr ipAddr = sa.sin_addr;
+	struct in_addr ip_addr = sa.sin_addr;
 
-	char str[INET_ADDRSTRLEN];
-	inet_ntop(AF_INET, &ipAddr, str, INET_ADDRSTRLEN);
-	return (String(str));
+	char *s = inet_ntoa (ip_addr);
+        int oct0, oct1, oct2, oct3;
+        sscanf (s, "%d.%d.%d.%d", &oct0, &oct1, &oct2, &oct3);
+	return (IPAddress(oct0,oct1,oct2,oct3));
 }

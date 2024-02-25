@@ -12,39 +12,13 @@ SBox plot_b[PANE_N] = {
     {575, 0, PLOTBOX_W, PLOTBOX_H},
 };
 PlotChoice plot_ch[PANE_N];
-time_t plot_rotationT[PANE_N];
 uint32_t plot_rotset[PANE_N];
+
+#define X(a,b)  b,                      // expands PLOTNAMES to name and comma
 const char *plot_names[PLOT_CH_N] = {
-
-    // N.B. must be in same order as PLOT_CH_* 
-    // N.B. take care that names will fit in menu built by askPaneChoice()
-    // N.B. names should not include blanks, but _ are changed to blanks for prettier printing
-
-    "VOACAP",           // PLOT_CH_BC,
-    "DE_Wx",            // PLOT_CH_DEWX,
-    "DX_Cluster",       // PLOT_CH_DXCLUSTER,
-    "DX_Wx",            // PLOT_CH_DXWX,
-    "Solar_Flux",       // PLOT_CH_FLUX,
-    "Planetary_K",      // PLOT_CH_KP,
-    "Moon",             // PLOT_CH_MOON,
-    "Space_Wx",         // PLOT_CH_NOAASWX,
-    "Sunspot_N",        // PLOT_CH_SSN,
-    "X-Ray",            // PLOT_CH_XRAY,
-    "Rotator",          // PLOT_CH_GIMBAL,
-    "ENV_Temp",         // PLOT_CH_TEMPERATURE,
-    "ENV_Press",        // PLOT_CH_PRESSURE,
-    "ENV_Humid",        // PLOT_CH_HUMIDITY,
-    "ENV_DewPt",        // PLOT_CH_DEWPOINT,
-    "SDO_Comp",         // PLOT_CH_SDO_1,
-    "SDO_6173A",        // PLOT_CH_SDO_2,
-    "SDO_Magneto",      // PLOT_CH_SDO_3,
-    "SDO_193A",         // PLOT_CH_SDO_4,
-    "Solar_Wind",       // PLOT_CH_SOLWIND,
-    "DRAP",             // PLOT_CH_DRAP,
-    "Countdown",        // PLOT_CH_COUNTDOWN,
-    "STEREO_A",         // PLOT_CH_STEREO_A,
-    "Live_spots"        // PLOT_CH_PSK,
+    PLOTNAMES
 };
+#undef X
 
 /* retrieve the plot choice for the given pane from NV, if set
  */
@@ -90,7 +64,7 @@ static void setDefaultPaneChoice (PlotPane pp)
             }
         }
     } else {
-        const PlotChoice ch_defaults[PANE_N] = {PLOT_CH_SSN, PLOT_CH_XRAY, PLOT_CH_SDO_1};
+        const PlotChoice ch_defaults[PANE_N] = {PLOT_CH_SSN, PLOT_CH_XRAY, PLOT_CH_SDO};
         plot_ch[pp] = ch_defaults[pp];
         plot_rotset[pp] = (1 << plot_ch[pp]);
         Serial.printf (_FX("PANE: Setting pane %d to default %s\n"), (int)pp+1, plot_names[plot_ch[pp]]);
@@ -118,30 +92,31 @@ bool plotChoiceIsAvailable (PlotChoice ch)
     case PLOT_CH_HUMIDITY:      return (getNBMEConnected() > 0);
     case PLOT_CH_DEWPOINT:      return (getNBMEConnected() > 0);
     case PLOT_CH_COUNTDOWN:     return (getSWEngineState(NULL,NULL) == SWE_COUNTDOWN);
+    case PLOT_CH_DEWX:          return ((brb_rotset & (1 << BRB_SHOW_DEWX)) == 0);
+    case PLOT_CH_DXWX:          return ((brb_rotset & (1 << BRB_SHOW_DXWX)) == 0);
+
+    // the remaining pane type are always available
 
     case PLOT_CH_BC:            // fallthru
-    case PLOT_CH_DEWX:          // fallthru
-    case PLOT_CH_DXWX:          // fallthru
     case PLOT_CH_FLUX:          // fallthru
     case PLOT_CH_KP:            // fallthru
     case PLOT_CH_MOON:          // fallthru
     case PLOT_CH_NOAASWX:       // fallthru
     case PLOT_CH_SSN:           // fallthru
     case PLOT_CH_XRAY:          // fallthru
-    case PLOT_CH_SDO_1:         // fallthru
-    case PLOT_CH_SDO_2:         // fallthru
-    case PLOT_CH_SDO_3:         // fallthru
-    case PLOT_CH_SDO_4:         // fallthru
+    case PLOT_CH_SDO:           // fallthru
     case PLOT_CH_SOLWIND:       // fallthru
     case PLOT_CH_DRAP:          // fallthru
-    case PLOT_CH_STEREO_A:      // fallthru
+    case PLOT_CH_CONTESTS:      // fallthru
     case PLOT_CH_PSK:           // fallthru
+    case PLOT_CH_BZBT:          // fallthru
+    case PLOT_CH_POTA:          // fallthru
+    case PLOT_CH_SOTA:          // fallthru
+    case PLOT_CH_ADIF:          // fallthru
         return (true);
-        break;
 
-    default:
-        fatalError (_FX("plotChoiceIsAvailable() bad choice %d"), (int)ch);
-        return (false);
+    case PLOT_CH_N:
+        break;                  // lint
     }
 
     return (false);
@@ -166,17 +141,43 @@ void logBRBRotSet()
     for (int i = 0; i < BRB_N; i++)
         if (brb_rotset & (1 << i))
             Serial.printf (_FX("    %c%s\n"), i == brb_mode ? '*' : ' ', brb_names[i]);
+    Serial.printf (_FX("BR: now mode %d\n"), brb_mode);
+}
+
+/* return whether all panes in the given rotation set can be accommodated together.
+ */
+bool paneComboOk (const uint32_t new_rotsets[PANE_N])
+{
+#if !defined(_IS_ESP8266)
+    // only an issue on ESP
+    return (true);
+#else
+    // count list of panes that use dynmic memory
+    static uint8_t himem_panes[] PROGMEM = {
+        PLOT_CH_DXCLUSTER, PLOT_CH_TEMPERATURE, PLOT_CH_PRESSURE, PLOT_CH_HUMIDITY, PLOT_CH_DEWPOINT,
+        PLOT_CH_CONTESTS, PLOT_CH_PSK, PLOT_CH_POTA, PLOT_CH_SOTA, PLOT_CH_ADIF
+    };
+    int n_used = 0;
+    for (int i = 0; i < PANE_N; i++)
+        for (int j = 0; j < NARRAY(himem_panes); j++)
+            if ((1 << pgm_read_byte(&himem_panes[j])) & new_rotsets[i])
+                n_used++;
+
+    // allow only 1
+    return (n_used <= 1);
+
+#endif
 }
 
 /* show a table of suitable plot choices in and for the given pane and allow user to choose one or more.
  * always return a selection even if it's the current selection again, never PLOT_CH_NONE.
  */
-PlotChoice askPaneChoice (PlotPane pp)
+static PlotChoice askPaneChoice (PlotPane pp)
 {
     resetWatchdog();
 
     // set this temporarily to show all choices, just for testing worst-case layout
-    #define ASKP_SHOWALL 0
+    #define ASKP_SHOWALL 0                      // RBF
 
     // build items from all candidates suitable for this pane
     MenuItem *mitems = NULL;
@@ -221,7 +222,7 @@ PlotChoice askPaneChoice (PlotPane pp)
         // show feedback
         menuRedrawOk (ok_b, MENU_OK_BUSY);
 
-        // find new rotset
+        // find new rotset for this pane
         uint32_t new_rotset = 0;
         for (int i = 0; i < n_mitems; i++) {
             if (mitems[i].set) {
@@ -235,8 +236,18 @@ PlotChoice askPaneChoice (PlotPane pp)
             }
         }
 
-        // enforce cluster on its own
-        if ((new_rotset & (1<<PLOT_CH_DXCLUSTER)) && (new_rotset & ~(1<<PLOT_CH_DXCLUSTER))) {
+        // enforce limit on number of high-memory scrolling panes
+        uint32_t new_sets[PANE_N];
+        memcpy (new_sets, plot_rotset, sizeof(new_sets));
+        new_sets[pp] = new_rotset;
+        if (isSatDefined() && !paneComboOk(new_sets)) {
+
+            plotMessage (box, RA8875_RED, _FX("Too many high-memory panes with a satellite"));
+            wdDelay(5000);
+
+
+        // enforce dx cluster alone in its pane
+        } else if ((new_rotset & (1<<PLOT_CH_DXCLUSTER)) && (new_rotset & ~(1<<PLOT_CH_DXCLUSTER))) {
 
             plotMessage (box, RA8875_RED, _FX("DX Cluster may not be combined with other choices"));
             wdDelay(5000);
@@ -379,15 +390,19 @@ void insureCountdownPaneSensible()
  */
 bool checkPlotTouch (const SCoord &s, PlotPane pp, TouchType tt)
 {
+    // ignore pane 1 taps while reverting
+    if (pp == PANE_1 && ignorePane1Touch())
+        return (false);
+
     // for sure not ours if not even in this box
     SBox &box = plot_b[pp];
     if (!inBox (s, box))
         return (false);
 
     // reserve top 20% for bringing up choice menu
-    bool in_top = s.y < box.y + box.h/5;
+    bool in_top = s.y < box.y + PANETITLE_H;
 
-    // check a few choices that have their own active areas
+    // check the choices that have their own active areas
     switch (plot_ch[pp]) {
     case PLOT_CH_DXCLUSTER:
         if (checkDXClusterTouch (s, box))
@@ -396,6 +411,16 @@ bool checkPlotTouch (const SCoord &s, PlotPane pp, TouchType tt)
         break;
     case PLOT_CH_BC:
         if (checkBCTouch (s, box))
+            return (true);
+        in_top = true;
+        break;
+    case PLOT_CH_CONTESTS:
+        if (checkContestsTouch (s, box))
+            return (true);
+        in_top = true;
+        break;
+    case PLOT_CH_SDO:
+        if (checkSDOTouch (s, box))
             return (true);
         in_top = true;
         break;
@@ -417,8 +442,38 @@ bool checkPlotTouch (const SCoord &s, PlotPane pp, TouchType tt)
             return(true);
         }
         break;
+    case PLOT_CH_SSN:
+        if (!in_top) {
+            plotMap (_FX("/ssn/ssn-history.txt"), _FX("SIDC Sunspot History"), SSPOT_COLOR);
+            initEarthMap();
+            return(true);
+        }
+        break;
+    case PLOT_CH_FLUX:
+        if (!in_top) {
+            plotMap (_FX("/solar-flux/solarflux-history.txt"), _FX("10.7 cm Solar Flux History"),
+                                SFLUX_COLOR);
+            initEarthMap();
+            return(true);
+        }
+        break;
     case PLOT_CH_PSK:
         if (checkPSKTouch (s, box))
+            return (true);
+        in_top = true;
+        break;
+    case PLOT_CH_POTA:
+        if (checkOnTheAirTouch (s, box, ONTA_POTA))
+            return (true);
+        in_top = true;
+        break;
+    case PLOT_CH_SOTA:
+        if (checkOnTheAirTouch (s, box, ONTA_SOTA))
+            return (true);
+        in_top = true;
+        break;
+    case PLOT_CH_ADIF:
+        if (checkADIFTouch (s, box))
             return (true);
         in_top = true;
         break;
@@ -501,6 +556,7 @@ void initPlotPanes()
 
     // rm any choice not available, including dx cluster in pane 1
     for (int i = 0; i < PANE_N; i++) {
+        plot_rotset[i] &= ((1 << PLOT_CH_N) - 1);        // reset any bits too high
         for (int j = 0; j < PLOT_CH_N; j++) {
             if (plot_rotset[i] & (1 << j)) {
                 if (i == PANE_1 && j == PLOT_CH_DXCLUSTER) {
@@ -516,7 +572,8 @@ void initPlotPanes()
 
     // if current selection not yet defined or not in rotset pick one from rotset or set a default
     for (int i = 0; i < PANE_N; i++) {
-        if (!getPlotChoiceNV ((PlotPane)i, &plot_ch[i]) || !(plot_rotset[i] & (1 << plot_ch[i])))
+        if (!getPlotChoiceNV ((PlotPane)i, &plot_ch[i]) || plot_ch[i] >= PLOT_CH_N
+                                                        || !(plot_rotset[i] & (1 << plot_ch[i])))
             setDefaultPaneChoice ((PlotPane)i);
     }
 
@@ -572,27 +629,27 @@ void savePlotOps()
     NVWriteUInt8 (NV_PLOT_1, plot_ch[PANE_1]);
     NVWriteUInt8 (NV_PLOT_2, plot_ch[PANE_2]);
     NVWriteUInt8 (NV_PLOT_3, plot_ch[PANE_3]);
-
-    logState();
 }
 
 /* flash plot borders nearly ready to change, and include NCDXF_b also.
  */
 void showRotatingBorder ()
 {
-    time_t t0 = now();
+    time_t t0 = myNow();
 
     // check plot panes
     for (int i = 0; i < PANE_N; i++) {
-        if (paneIsRotating(i)) {
-            uint16_t c = ((plot_rotationT[i] > t0 + PLOT_ROT_WARNING) || (t0&1) == 1) ? RA8875_WHITE : GRAY;
+        if (paneIsRotating((PlotPane)i) || (isSDORotating() && findPaneChoiceNow(PLOT_CH_SDO) == i)) {
+            // this pane is rotating among other pane choices or SDO is rotating its images
+            uint16_t c = ((nextPaneRotation((PlotPane)i) > t0 + PLOT_ROT_WARNING) || (t0&1) == 1)
+                                ? RA8875_WHITE : GRAY;
             drawSBox (plot_b[i], c);
         }
     }
 
     // check BRB
     if (BRBIsRotating()) {
-        uint16_t c = ((brb_rotationT > t0 + PLOT_ROT_WARNING) || (t0&1) == 1) ? RA8875_WHITE : GRAY;
+        uint16_t c = ((brb_updateT > t0 + PLOT_ROT_WARNING) || (t0&1) == 1) ? RA8875_WHITE : GRAY;
         drawSBox (NCDXF_b, c);
     }
 
@@ -609,7 +666,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
     Serial.println(hc_url);
     resetWatchdog();
-    if (wifiOk() && client.connect(svr_host, HTTPPORT)) {
+    if (wifiOk() && client.connect(backend_host, backend_port)) {
         updateClocks(false);
 
         // composite types
@@ -617,7 +674,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
         union { char c[2]; uint16_t x; } i16;
 
         // query web page
-        httpHCGET (client, svr_host, hc_url);
+        httpHCGET (client, backend_host, hc_url);
 
         // skip response header
         if (!httpSkipHeader (client)) {
@@ -630,7 +687,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
         char c;
 
         // read first two bytes to confirm correct format
-        if (!getChar(client,&c) || c != 'B' || !getChar(client,&c) || c != 'M') {
+        if (!getTCPChar(client,&c) || c != 'B' || !getTCPChar(client,&c) || c != 'M') {
             plotMessage (box, color, _FX("File not BMP"));
             goto out;
         }
@@ -638,13 +695,13 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
         // skip down to byte 10 which is the offset to the pixels offset
         while (byte_os++ < 10) {
-            if (!getChar(client,&c)) {
+            if (!getTCPChar(client,&c)) {
                 plotMessage (box, color, _FX("Header offset error"));
                 goto out;
             }
         }
         for (uint8_t i = 0; i < 4; i++, byte_os++) {
-            if (!getChar(client,&i32.c[i])) {
+            if (!getTCPChar(client,&i32.c[i])) {
                 plotMessage (box, color, _FX("Pix_start error"));
                 goto out;
             }
@@ -654,7 +711,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
         // next word is subheader size, must be 40 BITMAPINFOHEADER
         for (uint8_t i = 0; i < 4; i++, byte_os++) {
-            if (!getChar(client,&i32.c[i])) {
+            if (!getTCPChar(client,&i32.c[i])) {
                 plotMessage (box, color, _FX("Hdr size error"));
                 goto out;
             }
@@ -668,7 +725,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
         // next word is width
         for (uint8_t i = 0; i < 4; i++, byte_os++) {
-            if (!getChar(client,&i32.c[i])) {
+            if (!getTCPChar(client,&i32.c[i])) {
                 plotMessage (box, color, _FX("Width error"));
                 goto out;
             }
@@ -677,7 +734,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
         // next word is height
         for (uint8_t i = 0; i < 4; i++, byte_os++) {
-            if (!getChar(client,&i32.c[i])) {
+            if (!getTCPChar(client,&i32.c[i])) {
                 plotMessage (box, color, _FX("Height error"));
                 goto out;
             }
@@ -688,7 +745,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
         // next short is n color planes
         for (uint8_t i = 0; i < 2; i++, byte_os++) {
-            if (!getChar(client,&i16.c[i])) {
+            if (!getTCPChar(client,&i16.c[i])) {
                 plotMessage (box, color, _FX("Planes error"));
                 goto out;
             }
@@ -702,7 +759,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
         // next short is bits per pixel
         for (uint8_t i = 0; i < 2; i++, byte_os++) {
-            if (!getChar(client,&i16.c[i])) {
+            if (!getTCPChar(client,&i16.c[i])) {
                 plotMessage (box, color, _FX("bits/pix error"));
                 goto out;
             }
@@ -716,7 +773,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
         // next word is compression method
         for (uint8_t i = 0; i < 4; i++, byte_os++) {
-            if (!getChar(client,&i32.c[i])) {
+            if (!getTCPChar(client,&i32.c[i])) {
                 plotMessage (box, color, _FX("Compression error"));
                 goto out;
             }
@@ -730,7 +787,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
 
         // skip down to start of pixels
         while (byte_os++ <= pix_start) {
-            if (!getChar(client,&c)) {
+            if (!getTCPChar(client,&c)) {
                 plotMessage (box, color, _FX("Header 3 error"));
                 goto out;
             }
@@ -762,7 +819,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
                 char b, g, r;
 
                 // read next pixel -- note order!
-                if (!getChar (client, &b) || !getChar (client, &g) || !getChar (client, &r)) {
+                if (!getTCPChar (client, &b) || !getTCPChar (client, &g) || !getTCPChar (client, &r)) {
                     // allow a little loss because ESP TCP stack can fall behind while also drawing
                     int32_t n_draw = img_y*img_w + img_x;
                     if (n_draw > 9*n_pix/10) {
@@ -785,7 +842,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
                     uint8_t ug = g;
                     uint8_t ub = b;
                     uint16_t color16 = RGB565(ur,ug,ub);
-                    tft.drawSubPixel (v_b.x + img_x - xborder,
+                    tft.drawPixelRaw (v_b.x + img_x - xborder,
                                 v_b.y + v_b.h - (img_y - yborder) - 1, color16); // vertical flip
                 }
             }
@@ -794,7 +851,7 @@ bool drawHTTPBMP (const char *hc_url, const SBox &box, uint16_t color)
             uint8_t extra = img_w % 4;
             if (extra > 0) {
                 for (uint8_t i = 0; i < 4 - extra; i++) {
-                    if (!getChar(client,&c)) {
+                    if (!getTCPChar(client,&c)) {
                         plotMessage (box, color, _FX("Row padding error"));
                         goto out;
                     }
@@ -814,42 +871,49 @@ out:
     return (ok);
 }
 
-/* wait until:
- *   a tap occurs inside inbox;
- *   (*fp)() (IFF fp != NULL) returns true; or
- *   nothing happens for to_ms millis.
- * if tap inbox return location and true, else false for all other cases.
- * while waiting we optionally update clocks and allow some web server commands.
+/* given min and max and an approximate number of divisions desired,
+ * fill in ticks[] with nicely spaced values and return how many.
+ * N.B. return value, and hence number of entries to ticks[], might be as
+ *   much as 2 more than numdiv.
  */
-bool waitForTap (const SBox &inbox, bool (*fp)(void), uint32_t to_ms, bool update_clocks, SCoord &tap)
+int tickmarks (float min, float max, int numdiv, float ticks[])
 {
-    drainTouch();
+    static int factor[] = { 1, 2, 5 };
+    #define NFACTOR    NARRAY(factor)
+    float minscale;
+    float delta;
+    float lo;
+    float v;
+    int n;
 
-    uint32_t t0 = millis();
-    for(;;) {
+    minscale = fabsf (max - min);
 
-        SCoord s;
-        if (readCalTouchWS(s) != TT_NONE) {
-            drainTouch();
-            if (inBox (s, inbox)) {
-                tap = s;
-                return(true);
-            }
-            t0 = millis();
-        }
-
-        if (timesUp (&t0, to_ms))
-            return (false);
-
-        if (fp && (*fp)())
-            return (false);
-
-        if (update_clocks)
-            updateClocks(false);
-
-        wdDelay (100);
-
-        // refresh protected region in case X11 window is moved
-        tft.drawPR();
+    if (minscale == 0) {
+        /* null range: return ticks in range min-1 .. min+1 */
+        for (n = 0; n < numdiv; n++)
+            ticks[n] = min - 1.0 + n*2.0/numdiv;
+        return (numdiv);
     }
+
+    delta = minscale/numdiv;
+    for (n=0; n < (int)NFACTOR; n++) {
+        float scale;
+        float x = delta/factor[n];
+        if ((scale = (powf(10.0F, ceilf(log10f(x)))*factor[n])) < minscale)
+            minscale = scale;
+    }
+    delta = minscale;
+
+    lo = floor(min/delta);
+    for (n = 0; (v = delta*(lo+n)) < max+delta; )
+        ticks[n++] = v;
+
+    return (n);
+}
+
+/* return whether any pane is currently rotating to other panes
+ */
+bool paneIsRotating (PlotPane pp)
+{
+    return ((plot_rotset[pp] & ~(1 << plot_ch[pp])) != 0);  // look for any bit on other than plot_ch
 }

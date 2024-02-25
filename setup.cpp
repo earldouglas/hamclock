@@ -9,7 +9,6 @@
  */
 #define DEF_SSID        "FiOS-9QRT4-Guest"
 #define DEF_PASS        "Veritium2017"
-#define DEF_CALL        "WB0OEW"
 
 // feature tests.
 
@@ -26,45 +25,52 @@
 
 
 // debugs: force all on just for visual testing, and show bounds
-// #define _SHOW_ALL                    // remove before flight
-// #define _MARK_BOUNDS                 // remove before flight
+// #define _SHOW_ALL                    // RBF
+// #define _MARK_BOUNDS                 // RBF
+#if defined(_SHOW_ALL) || defined(_MARK_BOUNDS)
+#warning _SHOW_ALL and/or _MARK_BOUNDS are set
+#endif
 #ifdef _SHOW_ALL
     #undef _WIFI_NEVER
     #undef _WIFI_ASK
     #define _WIFI_ALWAYS
     #define _SUPPORT_FLIP
     #define _SUPPORT_KX3 
-    #define _SUPPORT_ENVSENSOR
-    #define _SUPPORT_GPIO
+    #define _SUPPORT_NATIVE_GPIO
+    #define _SUPPORT_ADIFILE
+    #define _SUPPORT_SPOTPATH
+    #define _SUPPORT_SCROLLLEN
 #endif // _SHOW_ALL
 
 
 // static storage for published setup items
-static char wifissid[NV_WIFI_SSID_LEN];
-static char wifipw[NV_WIFI_PW_LEN];
-static char callsign[NV_CALLSIGN_LEN];
-static char dxlogin[NV_DXLOGIN_LEN];
-static char dxhost[NV_DXHOST_LEN];
-static char rothost[NV_ROTHOST_LEN];
-static char righost[NV_RIGHOST_LEN];
-static char flrighost[NV_FLRIGHOST_LEN];
-static char gpsdhost[NV_GPSDHOST_LEN];
-static char ntphost[NV_NTPHOST_LEN];
+static char wifi_ssid[NV_WIFI_SSID_LEN];
+static char wifi_pw[NV_WIFI_PW_LEN];
+static char call_sign[NV_CALLSIGN_LEN];
+static char dx_login[NV_DXLOGIN_LEN];
+static char dx_host[NV_DXHOST_LEN];
+static char rot_host[NV_ROTHOST_LEN];
+static char rig_host[NV_RIGHOST_LEN];
+static char flrig_host[NV_FLRIGHOST_LEN];
+static char gpsd_host[NV_GPSDHOST_LEN];
+static char ntp_host[NV_NTPHOST_LEN];
 static uint8_t bright_min, bright_max;
-static uint16_t dxport;
-static uint16_t rigport, rotport, flrigport;
+static uint16_t dx_port;
+static uint16_t rig_port, rot_port, flrig_port;
 static float temp_corr[MAX_N_BME];
 static float pres_corr[MAX_N_BME];
 static int16_t center_lng;
 static int16_t alt_center_lng;
 static bool alt_center_lng_set;
 static char dxcl_cmds[N_DXCLCMDS][NV_DXCLCMD_LEN];
+static char dx_wlist[NV_DXWLIST_LEN];
+static char adif_fn[NV_ADIFFN_LEN];
+static char i2c_fn[NV_I2CFN_LEN];
 
 
 // layout constants
 #define NQR             4                       // number of virtual keyboard rows
 #define NQC             13                      // max number of keyboard columns
-#define KB_NCOLS        14                      // n cols in keyboard layout
 #define KB_CHAR_H       56                      // height of box containing 1 keyboard character
 #define KB_CHAR_W       59                      // width "
 #define KB_SPC_Y        (KB_Y0+NQR*KB_CHAR_H)   // top edge of special keyboard chars
@@ -82,19 +88,21 @@ static char dxcl_cmds[N_DXCLCMDS][NV_DXCLCMD_LEN];
 #define PR_H            (PR_A+PR_D)             // prompt height
 #define ASK_TO          10                      // user option timeout, seconds
 #define PAGE_W          120                     // page button width
-#define PAGE_H          35                      // page button height
+#define PAGE_H          33                      // page button height
 #define CURSOR_DROP     2                       // pixels to drop cursor
-#define NVMS_NONE       0                       // NV_MAPSPOTS to map nothing
-#define NVMS_PREFIX     1                       // NV_MAPSPOTS to map just prefix
-#define NVMS_CALL       2                       // NV_MAPSPOTS to map full callsign
-#define NVMS_PCMASK     3                       // NV_MAPSPOTS mask for NVMS_PREFIX or NVMS_CALL
-#define NVMS_PATH       4                       // NV_MAPSPOTS |= to show path
+#define NVMS_MKMSK      0x3                     // NV_MAPSPOTS mark mask
+#define NVMS_NONE       0                       // NV_MAPSPOTS & MKMSK value to not mark spots
+#define NVMS_PREFIX     1                       // NV_MAPSPOTS & MKMSK value to mark spots with prefix
+#define NVMS_CALL       2                       // NV_MAPSPOTS & MKMSK value to mark spots with call_sign
+#define NVMS_DOT        3                       // NV_MAPSPOTS & MKMSK value to mark spots with dots
+#define NVMS_THIN       0x4                     // NV_MAPSPOTS bit to use THINPATHSZ
+#define NVMS_WIDE       0x8                     // NV_MAPSPOTS bit to use WIDEPATHSZ
 #define R2Y(r)          ((r)*(PR_H+2))          // macro given row index from 0 return screen y
 
 // color selector constants
 #define CSEL_SCX        435                     // all color control scales x coord
 #define CSEL_COL1X      2                       // tick boxes in column 1 x
-#define CSEL_COL2X      400                     // tick boxes in column 2 x
+#define CSEL_COL2X      415                     // tick boxes in column 2 x
 #define CSEL_SCY        45                      // top scale y coord
 #define CSEL_SCW        256                     // scale width -- lt this causes roundoff at end
 #define CSEL_SCH        30                      // scale height
@@ -102,15 +110,17 @@ static char dxcl_cmds[N_DXCLCMDS][NV_DXCLCMD_LEN];
 #define CSEL_VDX        20                      // gap dx to value number
 #define CSEL_SCM_C      RA8875_WHITE            // scale marker color
 #define CSEL_SCB_C      GRAY                    // scale slider border color
-#define CSEL_PDX        28                      // prompt dx from tick box x
+#define CSEL_PDX        60                      // prompt dx from tick box x
 #define CSEL_PW         140                     // width
-#define CSEL_DDX        218                     // demo strip dx from tick box x
+#define CSEL_DDX        195                     // demo strip dx from tick box x
 #define CSEL_DW         150                     // demo strip width
 #define CSEL_DH         6                       // demo strip height
 #define CSEL_TBCOL      RA8875_RED              // tick box active color
 #define CSEL_TBSZ       20                      // tick box size
-#define CSEL_TBDY       4                       // tick box y offset from R2Y
-#define CSEL_NDASH      10                      // n segments in dashed color sample
+#define CSEL_TBDY       5                       // tick box y offset from R2Y
+#define CSEL_NDASH      11                      // n segments in dashed color sample
+#define CSEL_DDY        12                      // demo strip dy down from rot top
+#define CSEL_ADX        32                      // dashed tick box dx from tick box x
 
 // OnOff layout constants
 #define OO_Y0           150                     // top y
@@ -174,12 +184,13 @@ typedef enum {
     CALL_SPR,
     LAT_SPR,
     LNG_SPR,
+    GRID_SPR,
     GPSDHOST_SPR,
     WIFISSID_SPR,
     WIFIPASS_SPR,
 
     // page "2"
-    NTPHOST_SPR,
+    DXWLIST_SPR,
     DXPORT_SPR,
     DXHOST_SPR,
     DXLOGIN_SPR,
@@ -195,13 +206,16 @@ typedef enum {
     ROTHOST_SPR,
     FLRIGPORT_SPR,
     FLRIGHOST_SPR,
+    NTPHOST_SPR,
+    ADIFFN_SPR,
 
     // page "4"
     CENTERLNG_SPR,
-    TEMPCORR_SPR,
-    PRESCORR_SPR,
-    TEMPCORR2_SPR,
-    PRESCORR2_SPR,
+    I2CFN_SPR,
+    BME76_DT,
+    BME76_DP,
+    BME77_DT,
+    BME77_DP,
     BRMIN_SPR,
     BRMAX_SPR,
 
@@ -214,46 +228,54 @@ static StringPrompt string_pr[N_SPR] = {
 
     // "page 1" -- index 0
 
-    {0, {10,  R2Y(0), 70, PR_H}, {100, R2Y(0), 270, PR_H}, "Call:",   callsign, NV_CALLSIGN_LEN, 0}, 
-    {0, {100, R2Y(1),180, PR_H}, {280, R2Y(1), 110, PR_H}, "Enter DE Lat:", NULL, 0, 0},       // shadowed
-    {0, {390, R2Y(1), 70, PR_H}, {480, R2Y(1), 110, PR_H}, "Lng:", NULL, 0, 0},                // shadowed
-    {0, {450, R2Y(2), 60, PR_H}, {510, R2Y(2), 290, PR_H}, "host:", gpsdhost, NV_GPSDHOST_LEN, 0},
-    {0, {100, R2Y(4), 65, PR_H}, {180, R2Y(4), 480, PR_H}, "SSID:", wifissid, NV_WIFI_SSID_LEN, 0},
-    {0, {670, R2Y(4),110, PR_H}, { 10, R2Y(5), 789, PR_H}, "Password:", wifipw, NV_WIFI_PW_LEN, 0},
+    {0, { 10, R2Y(0), 70, PR_H}, { 90, R2Y(0), 270, PR_H}, "Call:",   call_sign, NV_CALLSIGN_LEN, 0}, 
+    {0, { 90, R2Y(1),180, PR_H}, {270, R2Y(1), 110, PR_H}, "Enter DE Lat:", NULL, 0, 0},       // shadowed
+    {0, {380, R2Y(1), 50, PR_H}, {430, R2Y(1), 120, PR_H}, "Lng:", NULL, 0, 0},                // shadowed
+    {0, {560, R2Y(1), 60, PR_H}, {620, R2Y(1), 130, PR_H}, "Grid:", NULL, 0, 0},               // shadowed
+    {0, {460, R2Y(2), 60, PR_H}, {520, R2Y(2), 280, PR_H}, "host:", gpsd_host, NV_GPSDHOST_LEN, 0},
+    {0, { 90, R2Y(4), 60, PR_H}, {160, R2Y(4), 500, PR_H}, "SSID:", wifi_ssid, NV_WIFI_SSID_LEN, 0},
+    {0, {670, R2Y(4),110, PR_H}, { 10, R2Y(5), 789, PR_H}, "Password:", wifi_pw, NV_WIFI_PW_LEN, 0},
 
     // "page 2" -- index 1
 
-    {1, {100, R2Y(0), 60, PR_H}, {180, R2Y(0), 330, PR_H}, "host:", ntphost, NV_NTPHOST_LEN, 0},
+    {1, { 20, R2Y(1), 65, PR_H}, { 85, R2Y(1), 260, PR_H}, "watch:", dx_wlist, NV_DXWLIST_LEN, 0},
+    {1, { 20, R2Y(2), 65, PR_H}, { 85, R2Y(2),  85, PR_H}, "port:", NULL, 0, 0},               // shadowed
+    {1, { 20, R2Y(3), 65, PR_H}, { 85, R2Y(3), 260, PR_H}, "host:", dx_host, NV_DXHOST_LEN, 0},
+    {1, { 20, R2Y(4), 65, PR_H}, { 85, R2Y(4), 260, PR_H}, "login:", dx_login, NV_DXLOGIN_LEN, 0},
 
-    {1, { 20, R2Y(3), 70, PR_H}, {100, R2Y(3),  85, PR_H}, "port:", NULL, 0, 0},               // shadowed
-    {1, { 20, R2Y(4), 70, PR_H}, {100, R2Y(4), 250, PR_H}, "host:", dxhost, NV_DXHOST_LEN, 0},
-    {1, { 20, R2Y(5), 70, PR_H}, {100, R2Y(5), 250, PR_H}, "login:", dxlogin, NV_DXLOGIN_LEN, 0},
-
-    {1, {350, R2Y(2), 50, PR_H}, {400, R2Y(2), 400, PR_H}, NULL, dxcl_cmds[0], NV_DXCLCMD_LEN, 0},
-    {1, {350, R2Y(3), 50, PR_H}, {400, R2Y(3), 400, PR_H}, NULL, dxcl_cmds[1], NV_DXCLCMD_LEN, 0},
-    {1, {350, R2Y(4), 50, PR_H}, {400, R2Y(4), 400, PR_H}, NULL, dxcl_cmds[2], NV_DXCLCMD_LEN, 0},
-    {1, {350, R2Y(5), 50, PR_H}, {400, R2Y(5), 400, PR_H}, NULL, dxcl_cmds[3], NV_DXCLCMD_LEN, 0},
+    // 1 less that full width to avoid erasing border
+    {1, {350, R2Y(2), 40, PR_H}, {390, R2Y(2), 409, PR_H}, NULL, dxcl_cmds[0], NV_DXCLCMD_LEN, 0},
+    {1, {350, R2Y(3), 40, PR_H}, {390, R2Y(3), 409, PR_H}, NULL, dxcl_cmds[1], NV_DXCLCMD_LEN, 0},
+    {1, {350, R2Y(4), 40, PR_H}, {390, R2Y(4), 409, PR_H}, NULL, dxcl_cmds[2], NV_DXCLCMD_LEN, 0},
+    {1, {350, R2Y(5), 40, PR_H}, {390, R2Y(5), 409, PR_H}, NULL, dxcl_cmds[3], NV_DXCLCMD_LEN, 0},
 
 
     // "page 3" -- index 2
 
-    {2, {160, R2Y(0), 60, PR_H}, {220, R2Y(0),  85, PR_H}, "port:", NULL, 0, 0},               // shadowed
-    {2, {320, R2Y(0), 60, PR_H}, {380, R2Y(0), 400, PR_H}, "host:", righost, NV_RIGHOST_LEN, 0},
-    {2, {160, R2Y(1), 60, PR_H}, {220, R2Y(1),  85, PR_H}, "port:", NULL, 0, 0},               // shadowed
-    {2, {320, R2Y(1), 60, PR_H}, {380, R2Y(1), 400, PR_H}, "host:", rothost, NV_ROTHOST_LEN, 0},
-    {2, {160, R2Y(2), 60, PR_H}, {220, R2Y(2),  85, PR_H}, "port:", NULL, 0, 0},               // shadowed
-    {2, {320, R2Y(2), 60, PR_H}, {380, R2Y(2), 400, PR_H}, "host:", flrighost, NV_FLRIGHOST_LEN, 0},
+    {2, {150, R2Y(0), 60, PR_H}, {210, R2Y(0),  80, PR_H}, "port:", NULL, 0, 0},               // shadowed
+    {2, {290, R2Y(0), 60, PR_H}, {380, R2Y(0), 280, PR_H}, "host:", rig_host, NV_RIGHOST_LEN, 0},
+    {2, {150, R2Y(1), 60, PR_H}, {210, R2Y(1),  80, PR_H}, "port:", NULL, 0, 0},               // shadowed
+    {2, {290, R2Y(1), 60, PR_H}, {380, R2Y(1), 400, PR_H}, "host:", rot_host, NV_ROTHOST_LEN, 0},
+    {2, {150, R2Y(2), 60, PR_H}, {210, R2Y(2),  80, PR_H}, "port:", NULL, 0, 0},               // shadowed
+    {2, {290, R2Y(2), 60, PR_H}, {380, R2Y(2), 400, PR_H}, "host:", flrig_host, NV_FLRIGHOST_LEN, 0},
+
+    {2, {100, R2Y(4), 60, PR_H}, {160, R2Y(4), 330, PR_H}, "host:", ntp_host, NV_NTPHOST_LEN, 0},
+    {2, {100, R2Y(5), 60, PR_H}, {160, R2Y(5), 330, PR_H}, "file:", adif_fn, NV_ADIFFN_LEN, 0},
+
 
     // "page 4" -- index 3
 
     {3, {10,  R2Y(0), 200, PR_H}, {250, R2Y(0),  70, PR_H}, "Map center lng:", NULL, 0, 0},     // shadowed
-    {3, {100, R2Y(2), 120, PR_H}, {250, R2Y(2),  70, PR_H}, "dTemp@76:", NULL, 0, 0},           // shadowed
-    {3, {350, R2Y(2), 120, PR_H}, {500, R2Y(2),  70, PR_H}, "dPres@76:", NULL, 0, 0},           // shadowed
-    {3, {100, R2Y(3), 120, PR_H}, {250, R2Y(3),  70, PR_H}, "dTemp@77:", NULL, 0, 0},           // shadowed
-    {3, {350, R2Y(3), 120, PR_H}, {500, R2Y(3),  70, PR_H}, "dPres@77:", NULL, 0, 0},           // shadowed
 
-    {3, {10,  R2Y(5), 200, PR_H}, {250, R2Y(5),  70, PR_H}, "Brightness Min%:", NULL, 0, 0},    // shadowed
-    {3, {350, R2Y(5), 120, PR_H}, {500, R2Y(5),  70, PR_H}, "Max%:", NULL, 0, 0},               // shadowed
+    {3, {350, R2Y(1),  70, PR_H}, {440, R2Y(1),  360,PR_H}, "name:", i2c_fn, NV_I2CFN_LEN, 0},
+
+    {3, {100, R2Y(2), 240, PR_H}, {350, R2Y(2),  80, PR_H}, "BME280@76    dTemp:", NULL, 0, 0}, // shadowed
+    {3, {440, R2Y(2), 80,  PR_H}, {530, R2Y(2),  80, PR_H}, "dPres:", NULL, 0, 0},              // shadowed
+    {3, {100, R2Y(3), 240, PR_H}, {350, R2Y(3),  80, PR_H}, "BME280@77    dTemp:", NULL, 0, 0}, // shadowed
+    {3, {440, R2Y(3), 80,  PR_H}, {530, R2Y(3),  80, PR_H}, "dPres:", NULL, 0, 0},              // shadowed
+
+    {3, {10,  R2Y(5), 200, PR_H}, {250, R2Y(5),  80, PR_H}, "Brightness Min%:", NULL, 0, 0},    // shadowed
+    {3, {350, R2Y(5),  90, PR_H}, {450, R2Y(5),  80, PR_H}, "Max%:", NULL, 0, 0},               // shadowed
 
 
 
@@ -271,17 +293,6 @@ static StringPrompt string_pr[N_SPR] = {
 
 
 
-// define a boolean prompt
-typedef struct {
-    uint8_t page;                               // page number, 0 .. N_PAGES-1
-    SBox p_box;                                 // prompt box
-    SBox s_box;                                 // state box, if t/f_str
-    bool state;                                 // on or off
-    const char *p_str;                          // prompt string, or NULL to use just f/t_str
-    const char *f_str;                          // "false" string, or NULL
-    const char *t_str;                          // "true" string, or NULL
-} BoolPrompt;
-
 
 // N.B. must match bool_pr[] order
 typedef enum {
@@ -292,13 +303,8 @@ typedef enum {
     WIFI_BPR,
 
     // page "2"
-    NTPSET_BPR,
     CLUSTER_BPR,
     CLISWSJTX_BPR,
-    CLLBL_BPR,
-    CLLBLCALL_BPR,
-    CLPATH_BPR,
-    SETDX_BPR,
     DXCLCMD0_BPR,
     DXCLCMD1_BPR,
     DXCLCMD2_BPR,
@@ -308,87 +314,147 @@ typedef enum {
     RIGUSE_BPR,
     ROTUSE_BPR,
     FLRIGUSE_BPR,
+    NTPSET_BPR,
+    ADIFSET_BPR,
 
     // page "4"
     GPIOOK_BPR,
+    I2CON_BPR,
     KX3ON_BPR,
     KX3BAUD_BPR,
 
     // page "5"
     DATEFMT_MDY_BPR,
     DATEFMT_DMYYMD_BPR,
+    LOGUSAGE_BPR,
     WEEKDAY1MON_BPR,
+    DEMO_BPR,
     UNITS_BPR,
     BEARING_BPR,
-    LOGUSAGE_BPR,
-    DEMO_BPR,
+    SPOTLBL_BPR,
+    SPOTLBLCALL_BPR,
+    SPOTPATH_BPR,
+    SPOTPATHSZ_BPR,
+    SCROLLDIR_BPR,
+    SCROLLLEN_BPR,
+    SCROLLBIG_BPR,
     X11_FULLSCRN_BPR,
     FLIP_BPR,
 
-    N_BPR
+    N_BPR,
+    NOMATE                                      // flag for ent_mate
+
 } BPIds;
 
+// values for SCROLLLEN_BPR and SCROLLBIG_BPR
+#define NSCROLL_A       0
+#define NSCROLL_B       10
+#define NSCROLL_C       25
+#define NSCROLL_D       50
+
+// define a boolean prompt
+typedef struct {
+    uint8_t page;                               // page number, 0 .. N_PAGES-1
+    SBox p_box;                                 // prompt box
+    SBox s_box;                                 // state box, if t/f_str
+    bool state;                                 // on or off
+    const char *p_str;                          // prompt string, or NULL to use just f/t_str
+    const char *f_str;                          // "false" string, or NULL
+    const char *t_str;                          // "true" string, or NULL
+    BPIds ent_mate;                             // entanglement partner, else N_BPR
+} BoolPrompt;
+
 /* bool prompts. N.B. must match BPIds order
- * N.B. date format, cluster map, kx3 and date format use two "entangled" bools to create 3 states
+ * N.B. some fields use two "entangled" bools to create 3 states
  */
 static BoolPrompt bool_pr[N_BPR] = {
 
     // "page 1" -- index 0
 
-    {0, {100, R2Y(2), 180, PR_H}, {280, R2Y(2), 40,  PR_H}, false, "or use gpsd?", "No", "Yes"},
-    {0, {330, R2Y(2),  80, PR_H}, {410, R2Y(2), 40,  PR_H}, false, "follow?", "No", "Yes"},
-    {0, {100, R2Y(3), 180, PR_H}, {280, R2Y(3), 40,  PR_H}, false, "or IP Geolocate?", "No", "Yes"},
-    {0, {10,  R2Y(4),  70, PR_H}, {100, R2Y(4), 30,  PR_H}, false, "WiFi?", "No", NULL},
+    {0, { 90, R2Y(2), 180, PR_H}, {270, R2Y(2), 40,  PR_H}, false, "or use gpsd?", "No", "Yes", NOMATE},
+    {0, {330, R2Y(2),  80, PR_H}, {410, R2Y(2), 40,  PR_H}, false, "follow?", "No", "Yes", NOMATE},
+    {0, { 90, R2Y(3), 180, PR_H}, {270, R2Y(3), 40,  PR_H}, false, "or IP Geolocate?", "No", "Yes", NOMATE},
+    {0, {10,  R2Y(4),  70, PR_H}, {100, R2Y(4), 30,  PR_H}, false, "WiFi?", "No", NULL, NOMATE},
 
     // "page 2" -- index 1
 
-    {1, {10,  R2Y(0),  90, PR_H},  {100, R2Y(0), 300, PR_H}, false, "NTP?", "Use default set of servers", 0},
+    {1, {10,  R2Y(0),  90, PR_H},  {100, R2Y(0), 50,  PR_H}, false, "Cluster?", "No", "Yes", NOMATE},
+    {1, {200, R2Y(0),  90, PR_H},  {290, R2Y(0), 50,  PR_H}, false, "WSJT-X?", "No", "Yes", NOMATE},
 
-    {1, {10,  R2Y(1),  90, PR_H},  {100, R2Y(1), 60,  PR_H}, false, "Cluster?", "No", "Yes"},
-    {1, {200, R2Y(1),  90, PR_H},  {290, R2Y(1), 60,  PR_H}, false, "WSJT-X?", "No", "Yes"},
-
-    {1, { 20, R2Y(2),  70, PR_H},  {100, R2Y(2), 60,  PR_H}, false, "Label?", "No", NULL},
-    {1, {100, R2Y(2),   0, PR_H},  {100, R2Y(2), 60,  PR_H}, false, NULL, "Prefix", "Call"},
-                                                        // entangled: None: F X  Prefix: T F  Call: T T
-    {1, {200, R2Y(2),  90, PR_H},  {290, R2Y(2), 50,  PR_H}, false, "Path?", "No", "Yes"},
-    {1, {200, R2Y(3),  90, PR_H},  {290, R2Y(3), 50,  PR_H}, false, "Set DX?", "No", "Yes"},
-
-    {1, {350, R2Y(2),   0, PR_H},   {350, R2Y(2), 40, PR_H},  false, NULL, "Off:", "On:"},
-    {1, {350, R2Y(3),   0, PR_H},   {350, R2Y(3), 40, PR_H},  false, NULL, "Off:", "On:"},
-    {1, {350, R2Y(4),   0, PR_H},   {350, R2Y(4), 40, PR_H},  false, NULL, "Off:", "On:"},
-    {1, {350, R2Y(5),   0, PR_H},   {350, R2Y(5), 40, PR_H},  false, NULL, "Off:", "On:"},
+    {1, {350, R2Y(2),   0, PR_H},  {350, R2Y(2), 40, PR_H},  false, NULL, "Off:", "On:", NOMATE},
+    {1, {350, R2Y(3),   0, PR_H},  {350, R2Y(3), 40, PR_H},  false, NULL, "Off:", "On:", NOMATE},
+    {1, {350, R2Y(4),   0, PR_H},  {350, R2Y(4), 40, PR_H},  false, NULL, "Off:", "On:", NOMATE},
+    {1, {350, R2Y(5),   0, PR_H},  {350, R2Y(5), 40, PR_H},  false, NULL, "Off:", "On:", NOMATE},
 
     // "page 3" -- index 2
 
-    {2, {10,  R2Y(0), 100, PR_H},  {100, R2Y(0),  60, PR_H}, false, "rigctld?", "No", "Yes"},
-    {2, {10,  R2Y(1), 100, PR_H},  {100, R2Y(1),  60, PR_H}, false, "rotctld?", "No", "Yes"},
-    {2, {10,  R2Y(2), 100, PR_H},  {100, R2Y(2),  60, PR_H}, false, "flrig?",   "No", "Yes"},
+    {2, {10,  R2Y(0), 100, PR_H},  {100, R2Y(0),  50, PR_H}, false, "rigctld?", "No", "Yes", NOMATE},
+    {2, {10,  R2Y(1), 100, PR_H},  {100, R2Y(1),  50, PR_H}, false, "rotctld?", "No", "Yes", NOMATE},
+    {2, {10,  R2Y(2), 100, PR_H},  {100, R2Y(2),  50, PR_H}, false, "flrig?",   "No", "Yes", NOMATE},
+
+    {2, {10,  R2Y(4),  90, PR_H},  {100, R2Y(4), 300, PR_H}, false, "NTP?", "Use default set of servers",
+                                                                                                0, NOMATE},
+    {2, {10,  R2Y(5),  90, PR_H},  {100, R2Y(5), 300, PR_H}, false, "ADIF?", "No", NULL, NOMATE},
 
 
     // "page 4" -- index 3
 
-    {3, {10,  R2Y(1),  80, PR_H},  {100, R2Y(1), 110, PR_H}, false, "GPIO?", "Off", "Active"},
+    {3, {10,  R2Y(1),  80, PR_H},  {100, R2Y(1), 110, PR_H}, false, "GPIO?", "Off", "Active", NOMATE},
+    {3, {250, R2Y(1),  80, PR_H},  {350, R2Y(1), 70,  PR_H}, false, "I2C file?", "No", NULL, NOMATE},
 
-    {3, {100, R2Y(4), 120, PR_H},  {250, R2Y(4),  70, PR_H}, false, "KX3?", "No", NULL},
-    {3, {250, R2Y(4),   0, PR_H},  {250, R2Y(4),  70, PR_H}, false, NULL, "4800", "38400"},
-                                                        // entangled: Off: F X   4800: T F   38400: T T
-
+    {3, {100, R2Y(4), 120, PR_H},  {250, R2Y(4),  120, PR_H}, false, "KX3?", "No", NULL, KX3BAUD_BPR},
+    {3, {250, R2Y(4),   0, PR_H},  {250, R2Y(4),  120, PR_H}, false, NULL, "4800 bps", "38400 bps",KX3ON_BPR},
+                                                // 3x entangled: Off: FX   4800: TF   38400: TT
 
     // "page 5" -- index 4
 
-    {4, {10,  R2Y(0), 140, PR_H},  {150, R2Y(0), 150, PR_H}, false, "Date order?", "Mon Day Year", NULL},
-    {4, {150, R2Y(0), 140, PR_H},  {150, R2Y(0), 150, PR_H}, false, NULL, "Day Mon Year", "Year Mon Day"},
-                                                        // entangled: MDY: F X   DMY: T F  YMD:  T T
-    {4, {10,  R2Y(1), 140, PR_H},  {150, R2Y(1), 120, PR_H},  false, "Week starts?", "Sunday", "Monday"},
-    {4, {10,  R2Y(2), 140, PR_H},  {150, R2Y(2), 120, PR_H},  false, "Units?", "Imperial", "Metric"},
-    {4, {10,  R2Y(3), 140, PR_H},  {150, R2Y(3), 120, PR_H},  false, "Bearings?", "True N", "Magnetic N"},
+    {4, {10,  R2Y(0), 140, PR_H},  {150, R2Y(0), 150, PR_H}, false, "Date order?", "Mon Day Year", NULL,
+                                                                                        DATEFMT_DMYYMD_BPR},
+    {4, {150, R2Y(0), 140, PR_H},  {150, R2Y(0), 150, PR_H}, false, NULL, "Day Mon Year", "Year Mon Day",
+                                                                                        DATEFMT_MDY_BPR},
+                                                // 3x entangled: MDY: FX   DMY: TF  YMD:  TT
 
 
-    {4, {400,  R2Y(0), 140, PR_H}, {540, R2Y(0),   90, PR_H}, false, "Log usage?", "Opt-Out", "Opt-In"},
-    {4, {400,  R2Y(1), 140, PR_H}, {540, R2Y(1),   40, PR_H}, false, "Demo mode?", "No", "Yes"},
-    {4, {400,  R2Y(2), 140, PR_H}, {540, R2Y(2),   40, PR_H}, false, "Full scrn?", "No", "Yes"},
-                                                                // state box wide enough for "Won't fit"
-    {4, {400,  R2Y(3), 140, PR_H}, {540, R2Y(3),   40, PR_H}, false, "Flip U/D?", "No", "Yes"},
+    {4, {400, R2Y(0), 140, PR_H},  {540, R2Y(0),  90, PR_H}, false, "Log usage?", "Opt-Out", "Opt-In",NOMATE},
+
+
+
+    {4, {10,  R2Y(1), 140, PR_H},  {150, R2Y(1), 120, PR_H}, false, "Week starts?", "Sunday","Monday",NOMATE},
+    {4, {400, R2Y(1), 140, PR_H},  {540, R2Y(1),  40, PR_H}, false, "Demo mode?", "No", "Yes", NOMATE},
+
+
+    {4, {10,  R2Y(2), 140, PR_H},  {150, R2Y(2), 120, PR_H}, false, "Units?", "Imperial", "Metric", NOMATE},
+    {4, {400, R2Y(2), 140, PR_H},  {540, R2Y(2), 120, PR_H}, false, "Bearings?","True N","Magnetic N",NOMATE},
+
+
+    {4, {10,  R2Y(3), 140, PR_H},  {150, R2Y(3), 120, PR_H}, false,"Spot labels?","No","Dot",SPOTLBLCALL_BPR},
+    {4, {150, R2Y(3), 140, PR_H},  {150, R2Y(3), 120, PR_H}, false, NULL, "Prefix", "Call", SPOTLBL_BPR},
+                                                // 4x entangled: No: FF Dot: TF  Prefix: FT  Call: TT
+
+
+
+    {4, {400, R2Y(3), 140, PR_H},  {540, R2Y(3), 120, PR_H}, false, "Spot paths?", "No", NULL,SPOTPATHSZ_BPR},
+    {4, {540, R2Y(3), 140, PR_H},  {540, R2Y(3), 120, PR_H}, false, NULL, "Thin", "Wide", SPOTPATH_BPR},
+                                                // 3x entangled: No: FX  Thin: TF  Wide: TT
+
+
+    {4, {10,  R2Y(4), 140, PR_H},  {150, R2Y(4), 120, PR_H}, false, "Scroll dir?", "Bottom-Up", "Top-Down",
+                                                                                                NOMATE},
+
+
+    {4, {400, R2Y(4), 140, PR_H},  {540, R2Y(4), 120, PR_H}, false, "Scroll length?", "0","10",SCROLLBIG_BPR},
+    {4, {540, R2Y(4), 140, PR_H},  {540, R2Y(4), 120, PR_H}, false, NULL, "25", "50", SCROLLLEN_BPR},
+                                                // 4x entangled:  0: FF  10: TF   25: FT  50: TT
+                                                // FF -> TF -> FT -> TT -> ...
+                                                // N.B. match NSCROLL_X
+
+
+    {4, {10 , R2Y(5), 140, PR_H},  {150, R2Y(5), 120, PR_H}, false, "Full scrn?", "No", "Yes", NOMATE},
+                                                // N.B. state box must be wide enough for "Won't fit"
+
+    {4, {400, R2Y(5), 140, PR_H},  {540, R2Y(5),  40, PR_H}, false, "Flip U/D?", "No", "Yes", NOMATE},
+
+
 
     // "page 6" -- index 5
 
@@ -413,17 +479,21 @@ typedef struct {
 #if defined(_SHOW_ALL)
     #define HAVE_ONOFF()      1
 #else
-    #define HAVE_ONOFF()      (brControlOk() || brOnOffOk())
+    #define HAVE_ONOFF()      (brDimmableOk() || brOnOffOk())
 #endif
 
 // current focus and page names
+#define SPIDER_PAGE     1                       // 0-based counting
 #define ALLBOOLS_PAGE   4                       // 0-based counting
 #define COLOR_PAGE      5                       // 0-based counting
 #define ONOFF_PAGE      6                       // 0-based counting
 #define N_PAGES         (HAVE_ONOFF() ? 7 : 6)  // last page is on/off
-#define SPIDER_PAGE     1
-#define SPIDER_X        480
-#define SPIDER_Y        (R2Y(2) - PR_D)
+#define SPIDER_TX       480                     // title x
+#define SPIDER_TY       (R2Y(2) - PR_D)         // title y
+#define SPIDER_BX       345                     // border x
+#define SPIDER_BY       (SPIDER_TY - PR_A)      // border y
+#define SPIDER_BRX      799                     // border right x
+#define SPIDER_BBY      (R2Y(6))                // border bottom y
 static Focus cur_focus;
 static int cur_page;
 
@@ -441,99 +511,140 @@ typedef struct {
     uint16_t def_c;                             // default color -- NOT the current color
     NV_Name nv;                                 // nvram location
     const char *p_str;                          // prompt string
+    SBox a_box;                                 // dashed control tick box, .x == 0 if not used
+    bool a_state;                               // whether dashed is enabled
     uint8_t r, g, b;                            // current color in full precision color
 } ColSelPrompt;
 
-/* SATPATH_CSPR dashed box
- */
-static SBox csel_satpath_b = {CSEL_COL1X+CSEL_DDX+CSEL_DW+15, R2Y(0)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ};
-static bool csel_satpath_state = true;
+#define DASHOK(p)       (p.a_box.x > 0)         // test whether this color has a dash control option
+#define NODASH(p)       do { p.a_box.x = 0; } while (0) // disable dash with this color
 
-/* color selector prompts.
- *   N.B. must match CSIds order
+
+/* color selector controls and prompts.
+ * N.B. must match ColorSelection order
  */
 static ColSelPrompt csel_pr[N_CSPR] = {
     {{CSEL_COL1X+CSEL_PDX, R2Y(0), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(0)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(0)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            true, RGB565(175,38,127), NV_SATPATHCOLOR, "Sat path"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(0)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, DE_COLOR, NV_SHORTPATHCOLOR, "Short path",
+            {CSEL_COL1X+CSEL_ADX, R2Y(0)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(1), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(1)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(1)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(236,193,79), NV_SATFOOTCOLOR, "Sat footprint"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(1)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(229,191,131), NV_LONGPATHCOLOR, "Long path",
+            {CSEL_COL1X+CSEL_ADX, R2Y(1)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(2), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(2)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(2)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, DE_COLOR, NV_SHORTPATHCOLOR, "Short prop path"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(2)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            true, RGB565(175,38,127), NV_SATPATHCOLOR, "Sat path",
+            {CSEL_COL1X+CSEL_ADX, R2Y(2)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(3), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(3)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(3)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(229,191,131), NV_LONGPATHCOLOR, "Long prop path"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(3)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(236,193,79), NV_SATFOOTCOLOR, "Sat footprint",
+            {0, 0, 0, 0}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(4), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(4)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(4)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(44,42,99), NV_GRIDCOLOR, "Map grid"},
-#if !defined(_SUPPORT_PSKESP)
+            {CSEL_COL1X+CSEL_DDX, R2Y(4)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(44,42,99), NV_GRIDCOLOR, "Map grid",
+            {0, 0, 0, 0}, false, 0, 0, 0},
 
-    // ESP does not draw paths so doesn't need band colors
+#if defined(_IS_UNIX)
+
+    // only UNIX supports drawing rotator direction on main map
+    {{CSEL_COL1X+CSEL_PDX, R2Y(5), CSEL_PW, PR_H},
+            {CSEL_COL1X, R2Y(5)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
+            {CSEL_COL1X+CSEL_DDX, R2Y(5)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RA8875_WHITE, NV_ROTCOLOR, "Rotator",
+            {0, 0, 0, 0}, false, 0, 0, 0},
+
+#endif // _IS_UNIX
 
     {{CSEL_COL1X+CSEL_PDX, R2Y(6), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(6)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(6)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, GRAY, NV_160M_COLOR, "160 m path"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(6)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(128,0,0), NV_160M_COLOR, "160 m",
+            {CSEL_COL1X+CSEL_ADX, R2Y(6)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(7), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(7)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(7)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(200,20,140), NV_80M_COLOR, "80 m path"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(7)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(128,128,0), NV_80M_COLOR, "80 m",
+            {CSEL_COL1X+CSEL_ADX, R2Y(7)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(8), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(8)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(8)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(140,200,20), NV_60M_COLOR, "60 m path"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(8)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(230,25,75), NV_60M_COLOR, "60 m",
+            {CSEL_COL1X+CSEL_ADX, R2Y(8)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(9), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(9)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(9)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(140,20,200), NV_40M_COLOR, "40 m path"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(9)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(245,130,48), NV_40M_COLOR, "40 m",
+            {CSEL_COL1X+CSEL_ADX, R2Y(9)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(10), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(10)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(10)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(20,200,255), NV_30M_COLOR, "30 m path"},
+            {CSEL_COL1X+CSEL_DDX, R2Y(10)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(200,176,20), NV_30M_COLOR, "30 m",
+            {CSEL_COL1X+CSEL_ADX, R2Y(10)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL1X+CSEL_PDX, R2Y(11), CSEL_PW, PR_H},
             {CSEL_COL1X, R2Y(11)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL1X+CSEL_DDX, R2Y(11)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RA8875_RED, NV_20M_COLOR, "20 m path"},   // match NCDXF
+            {CSEL_COL1X+CSEL_DDX, R2Y(11)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(250,250,0), NV_20M_COLOR, "20 m",
+            {CSEL_COL1X+CSEL_ADX, R2Y(11)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
 
     {{CSEL_COL2X+CSEL_PDX, R2Y(6), CSEL_PW, PR_H},
             {CSEL_COL2X, R2Y(6)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL2X+CSEL_DDX, R2Y(6)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RA8875_GREEN, NV_17M_COLOR, "17 m path"},   // match NCDXF
+            {CSEL_COL2X+CSEL_DDX, R2Y(6)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(60,180,75), NV_17M_COLOR, "17 m",
+            {CSEL_COL2X+CSEL_ADX, R2Y(6)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL2X+CSEL_PDX, R2Y(7), CSEL_PW, PR_H},
             {CSEL_COL2X, R2Y(7)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL2X+CSEL_DDX, R2Y(7)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(100,100,255), NV_15M_COLOR, "15 m path"},      // match NCDXF
+            {CSEL_COL2X+CSEL_DDX, R2Y(7)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(70,240,240), NV_15M_COLOR, "15 m",
+            {CSEL_COL2X+CSEL_ADX, R2Y(7)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL2X+CSEL_PDX, R2Y(8), CSEL_PW, PR_H},
             {CSEL_COL2X, R2Y(8)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL2X+CSEL_DDX, R2Y(8)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RA8875_YELLOW, NV_12M_COLOR, "12 m path"},     // match NCDXF
+            {CSEL_COL2X+CSEL_DDX, R2Y(8)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(0,130,200), NV_12M_COLOR, "12 m",
+            {CSEL_COL2X+CSEL_ADX, R2Y(8)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL2X+CSEL_PDX, R2Y(9), CSEL_PW, PR_H},
             {CSEL_COL2X, R2Y(9)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL2X+CSEL_DDX, R2Y(9)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(255,125,0), NV_10M_COLOR, "10 m path"}, // match NCDXF
+            {CSEL_COL2X+CSEL_DDX, R2Y(9)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(250,190,212), NV_10M_COLOR, "10 m",
+            {CSEL_COL2X+CSEL_ADX, R2Y(9)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL2X+CSEL_PDX, R2Y(10), CSEL_PW, PR_H},
             {CSEL_COL2X, R2Y(10)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL2X+CSEL_DDX, R2Y(10)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RGB565(20,140,200), NV_6M_COLOR, "6 m path"},
+            {CSEL_COL2X+CSEL_DDX, R2Y(10)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(200,150,100), NV_6M_COLOR, "6 m",
+            {CSEL_COL2X+CSEL_ADX, R2Y(10)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
+
     {{CSEL_COL2X+CSEL_PDX, R2Y(11), CSEL_PW, PR_H},
             {CSEL_COL2X, R2Y(11)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ},
-            {CSEL_COL2X+CSEL_DDX, R2Y(11)+PR_H/2-CSEL_DH/2, CSEL_DW, CSEL_DH},
-            false, RA8875_WHITE, NV_2M_COLOR, "2 m path"},
-#endif
+            {CSEL_COL2X+CSEL_DDX, R2Y(11)+CSEL_DDY, CSEL_DW, CSEL_DH},
+            false, RGB565(100,100,100), NV_2M_COLOR, "2 m",
+            {CSEL_COL2X+CSEL_ADX, R2Y(11)+CSEL_TBDY, CSEL_TBSZ, CSEL_TBSZ}, false, 0, 0, 0},
 };
 
-// overall color selector box, easier than 3 separate boxes, and current values
+
+
+// overall color selector box, easier than 3 separate boxes
 static SBox csel_ctl_b = {CSEL_SCX, CSEL_SCY, CSEL_SCW, 3*CSEL_SCH + 3*CSEL_SCYG};
 
-// handy conversions between x and value 0..255.
-// only valid when dx ranges from 0 .. CSEL_SCW-1
+// handy conversions between x coord and value 0..255.
+// N.B. only valid when x-CSEL_SCX ranges from 0 .. CSEL_SCW-1
 #define X2V(x)  (255*((x)-CSEL_SCX)/(CSEL_SCW-1))
 #define V2X(v)  (CSEL_SCX+(CSEL_SCW-1)*(v)/255)
 
@@ -571,17 +682,208 @@ static const uint8_t qroff[NQR] = {
 static const SBox delete_b  = {KB_INDENT, KB_SPC_Y, SBAR_X-KB_INDENT+1, KB_SPC_H};
 static const SBox space_b   = {SBAR_X, KB_SPC_Y, SBAR_W, KB_SPC_H};
 static const SBox done_b    = {SBAR_X+SBAR_W, KB_SPC_Y, SBAR_X-KB_INDENT+1, KB_SPC_H};
-static const SBox page_b    = {800-PAGE_W-KB_INDENT-1, 2, PAGE_W, PAGE_H};
+static const SBox page_b    = {800-PAGE_W-KB_INDENT-1, 1, PAGE_W, PAGE_H};
 
 // note whether ll edited
 static bool ll_edited;
 
-/* set ll_edited if sp is LAT_SPR or LNG_SPR
+
+// a few forward decls topo sort couldn't fix
+static void eraseSPValue (const StringPrompt *sp);
+static void drawSPValue (StringPrompt *sp);
+
+
+
+/* return the value string of the given entangled pair.
+ * N.B. B must be the forward ent_mate of A
+ * 3x entangled: a: FX  b: TF  c: TT
+ * 4x entangled: a: FF  b: TF  c: FT  d: TT
  */
-static void checkLLEdit(const StringPrompt *sp)
+static const char * getEntangledValue (const BoolPrompt *A, const BoolPrompt *B)
 {
-    if (sp == &string_pr[LAT_SPR] || sp == &string_pr[LNG_SPR])
+    if (B != &bool_pr[A->ent_mate])
+        fatalError (_FX("bogus entangled pair %s %s\n"), A->p_str, B->f_str);
+
+    const char *s;
+
+    if (A->t_str) {
+        // 4 states
+        if (B->state)
+            s = A->state ? B->t_str : B->f_str;
+        else
+            s = A->state ? A->t_str : A->f_str;
+    } else {
+        // 3 states
+        if (A->state)
+            s = B->state ? B->t_str : B->f_str;
+        else
+            s = A->f_str;
+    }
+
+    return (s);
+}
+
+/* log all string and bool settings
+ */
+static void logAllPrompts(void)
+{
+    // strings
+    for (StringPrompt *sp = string_pr; sp < &string_pr[N_SPR]; sp++)
+        if (sp->p_str)
+            Serial.printf (_FX("Setup: %s = %s\n"), sp->p_str, sp->v_str ? sp->v_str : _FX("NULL"));
+
+    // bools
+    for (int i = 0; i < N_BPR; i++) {
+        BoolPrompt *bp = &bool_pr[i];
+        if (bp->ent_mate == i+1)                        // only print the forward-reference pair
+            Serial.printf (_FX("Setup: %s = %s\n"), bp->p_str, getEntangledValue (bp, &bool_pr[i+1]));
+        else if (bp->ent_mate == NOMATE && bp->p_str)
+            Serial.printf (_FX("Setup: %s = %s\n"), bp->p_str,
+                bp->state ? (bp->t_str ? bp->t_str : _FX("T-NULL")) : (bp->f_str ? bp->f_str :_FX("F-NULL")));
+    }
+
+    // on/off times
+    uint16_t onoff[NV_DAILYONOFF_LEN];
+    NVReadString (NV_DAILYONOFF, (char*)onoff);
+    char oostr[40+6*DAYSPERWEEK];
+    size_t sl = snprintf (oostr, sizeof(oostr), _FX("Setup: DAILYONOFF =  On"));
+    for (int i = 0; i < DAYSPERWEEK; i++) {
+        uint16_t on = onoff[i];
+        sl += snprintf (oostr+sl, sizeof(oostr)-sl, _FX(" %02u:%02u"), on/60, on%60);
+    }
+    Serial.println (oostr);
+    sl = snprintf (oostr, sizeof(oostr), _FX("Setup: DAILYONOFF = Off"));
+    for (int i = 0; i < DAYSPERWEEK; i++) {
+        uint16_t off = onoff[i+DAYSPERWEEK];
+        sl += snprintf (oostr+sl, sizeof(oostr)-sl, _FX(" %02u:%02u"), off/60, off%60);
+    }
+    Serial.println (oostr);
+}
+
+/* prepare the shadowed prompts
+ * N.B. if call this, then always call freeShadowedParams() eventually
+ */
+static void initShadowedParams()
+{
+
+    string_pr[LAT_SPR].v_str = (char*)malloc(string_pr[LAT_SPR].v_len = 9);
+                                formatLat (de_ll.lat_d, string_pr[LAT_SPR].v_str, string_pr[LAT_SPR].v_len);
+    string_pr[LNG_SPR].v_str = (char*)malloc(string_pr[LNG_SPR].v_len = 9);
+                                formatLng (de_ll.lng_d, string_pr[LNG_SPR].v_str, string_pr[LNG_SPR].v_len);
+    string_pr[GRID_SPR].v_str = (char*)malloc(string_pr[GRID_SPR].v_len = MAID_CHARLEN);
+                                getNVMaidenhead (NV_DE_GRID, string_pr[GRID_SPR].v_str);
+    snprintf (string_pr[DXPORT_SPR].v_str = (char*)malloc(8), string_pr[DXPORT_SPR].v_len = 8,
+                                "%u", dx_port);
+    snprintf (string_pr[RIGPORT_SPR].v_str = (char*)malloc(8), string_pr[RIGPORT_SPR].v_len = 8,
+                                "%u", rig_port);
+
+    snprintf (string_pr[ROTPORT_SPR].v_str = (char*)malloc(8), string_pr[ROTPORT_SPR].v_len = 8,
+                                "%u", rot_port);
+    snprintf (string_pr[FLRIGPORT_SPR].v_str = (char*)malloc(8), string_pr[FLRIGPORT_SPR].v_len = 8,
+                                "%u", flrig_port);
+    snprintf (string_pr[BME76_DT].v_str = (char*)malloc(8), string_pr[BME76_DT].v_len = 8,
+                                "%.2f", temp_corr[BME_76]);
+    snprintf (string_pr[BME76_DP].v_str = (char*)malloc(8), string_pr[BME76_DP].v_len = 8,
+                                "%.3f", pres_corr[BME_76]);
+    snprintf (string_pr[BME77_DT].v_str = (char*)malloc(8), string_pr[BME77_DT].v_len = 8,
+                                "%.2f", temp_corr[BME_77]);
+
+    snprintf (string_pr[BME77_DP].v_str = (char*)malloc(8), string_pr[BME77_DP].v_len = 8,
+                                "%.3f", pres_corr[BME_77]);
+    snprintf (string_pr[BRMIN_SPR].v_str = (char*)malloc(8), string_pr[BRMIN_SPR].v_len = 8,
+                                "%u", bright_min);
+    snprintf (string_pr[BRMAX_SPR].v_str = (char*)malloc(8), string_pr[BRMAX_SPR].v_len = 8,
+                                "%u", bright_max);
+    snprintf (string_pr[CENTERLNG_SPR].v_str = (char*)malloc(5), string_pr[CENTERLNG_SPR].v_len = 5,
+                                "%.0f%c", fabsf((float)center_lng), center_lng < 0 ? 'W' : 'E');
+                                // conversion to float just to avoid g++ snprintf size warning
+}
+
+/* free the shadowed parameters
+ */
+static void freeShadowedParams()
+{
+    free (string_pr[LAT_SPR].v_str);
+    free (string_pr[LNG_SPR].v_str);
+    free (string_pr[GRID_SPR].v_str);
+    free (string_pr[DXPORT_SPR].v_str);
+    free (string_pr[RIGPORT_SPR].v_str);
+
+    free (string_pr[ROTPORT_SPR].v_str);
+    free (string_pr[FLRIGPORT_SPR].v_str);
+    free (string_pr[BME76_DT].v_str);
+    free (string_pr[BME76_DP].v_str);
+    free (string_pr[BME77_DT].v_str);
+
+    free (string_pr[BME77_DP].v_str);
+    free (string_pr[BRMIN_SPR].v_str);
+    free (string_pr[BRMAX_SPR].v_str);
+    free (string_pr[CENTERLNG_SPR].v_str);
+}
+
+/* set the given StringPrompt to a brief error message
+ */
+static void flagErrField (const StringPrompt *sp)
+{
+    eraseSPValue (sp);
+    tft.setTextColor (ERR_C);
+    tft.setCursor (sp->v_box.x, sp->v_box.y+sp->v_box.h-PR_D);
+    tft.print (F("Err"));
+}
+
+/* format latitude into s[].
+ */
+void formatLat (float lat_d, char s[], int s_len)
+{
+    snprintf (s, s_len, _FX("%.3f%c"), fabsf(lat_d), lat_d < 0 ? 'S' : 'N');
+}
+
+/* format longitude into s[].
+ */
+void formatLng (float lng_d, char s[], int s_len)
+{
+    snprintf (s, s_len, _FX("%.3f%c"), fabsf(lng_d), lng_d < 0 ? 'W' : 'E');
+}
+
+/* update interaction if sp is one of LAT/LNG/GRID_SPR.
+ * also set ll_edited.
+ */
+static void checkLLGEdit(const StringPrompt *sp)
+{
+    if (sp == &string_pr[LAT_SPR] || sp == &string_pr[LNG_SPR]) {
+
+        // convert to grid if possible
+        LatLong ll;
+        if (latSpecIsValid (string_pr[LAT_SPR].v_str, ll.lat_d)
+                        && lngSpecIsValid (string_pr[LNG_SPR].v_str, ll.lng_d)) {
+            normalizeLL (ll);
+            ll2maidenhead (string_pr[GRID_SPR].v_str, ll);
+            eraseSPValue (&string_pr[GRID_SPR]);
+            drawSPValue (&string_pr[GRID_SPR]);
+        } else {
+            flagErrField (&string_pr[GRID_SPR]);
+        }
+
         ll_edited = true;
+
+    } else if (sp == &string_pr[GRID_SPR]) {
+
+        // convert to ll if possible
+        LatLong ll;
+        if (maidenhead2ll (ll, sp->v_str)) {
+            formatLat (ll.lat_d, string_pr[LAT_SPR].v_str, string_pr[LAT_SPR].v_len);
+            eraseSPValue (&string_pr[LAT_SPR]);
+            drawSPValue (&string_pr[LAT_SPR]);
+            formatLng (ll.lng_d, string_pr[LNG_SPR].v_str, string_pr[LNG_SPR].v_len);
+            eraseSPValue (&string_pr[LNG_SPR]);
+            drawSPValue (&string_pr[LNG_SPR]);
+        } else {
+            flagErrField (&string_pr[LAT_SPR]);
+            flagErrField (&string_pr[LNG_SPR]);
+        }
+
+        ll_edited = true;
+    }
 }
 
 
@@ -596,13 +898,20 @@ static void noBlanks (char *s)
     *s_to = '\0';
 }
 
-/* draw, or erase, the Spider commands table header
+/* draw the Spider commands table header
  */
-static void drawSpiderCommandsHeader (bool draw)
+static void drawSpiderCommandsHeader()
 {
-    tft.setTextColor (draw ? PR_C : BG_C);
-    tft.setCursor (SPIDER_X, SPIDER_Y);
-    tft.print ("Spider Commands:");
+    // border
+    tft.drawLine (SPIDER_BX, SPIDER_BY, SPIDER_BRX, SPIDER_BY, GRAY);
+    tft.drawLine (SPIDER_BX, SPIDER_BBY, SPIDER_BRX, SPIDER_BBY, GRAY);
+    tft.drawLine (SPIDER_BX, SPIDER_BY, SPIDER_BX, SPIDER_BBY, GRAY);
+    tft.drawLine (SPIDER_BRX, SPIDER_BY, SPIDER_BRX, SPIDER_BBY, GRAY);
+
+    // labels
+    tft.setTextColor (PR_C);
+    tft.setCursor (SPIDER_TX, SPIDER_TY);
+    tft.print ("Cluster Commands:");
 }
 
 static void drawPageButton()
@@ -625,7 +934,7 @@ static bool boolIsRelevant (BoolPrompt *bp)
     if (bp->page != cur_page)
         return (false);
 
-#if !defined(_USE_X11)
+#if !defined(_USE_X11) && !defined(_WEB_ONLY)
     if (bp == &bool_pr[X11_FULLSCRN_BPR])
         return (false);
 #endif
@@ -639,34 +948,15 @@ static bool boolIsRelevant (BoolPrompt *bp)
         #endif
     }
 
-    if (bp == &bool_pr[CLLBL_BPR]) {
-        if (!bool_pr[CLUSTER_BPR].state)
-            return (false);
-    }
-
     if (bp == &bool_pr[CLISWSJTX_BPR]) {
         if (!bool_pr[CLUSTER_BPR].state)
             return (false);
     }
 
-    if (bp == &bool_pr[CLLBLCALL_BPR]) {
-        if (!bool_pr[CLUSTER_BPR].state || !bool_pr[CLLBL_BPR].state)
+    #if !defined(_SUPPORT_SPOTPATH)
+        if (bp == &bool_pr[SPOTPATH_BPR] || bp == &bool_pr[SPOTPATHSZ_BPR])
             return (false);
-    }
-
-    if (bp == &bool_pr[CLPATH_BPR]) {
-        #if defined(_SUPPORT_CLPATH)
-            // always false if no support
-            if (!bool_pr[CLUSTER_BPR].state)
-        #endif
-                return (false);
-    }
-
-    if (bp == &bool_pr[SETDX_BPR]) {
-        // only show if enabled and host is WSJT
-        if (!bool_pr[CLUSTER_BPR].state || !bool_pr[CLISWSJTX_BPR].state)
-            return (false);
-    }
+    #endif
 
     if (bp == &bool_pr[DXCLCMD0_BPR] || bp == &bool_pr[DXCLCMD1_BPR]
                     || bp == &bool_pr[DXCLCMD2_BPR] || bp == &bool_pr[DXCLCMD3_BPR]) {
@@ -704,8 +994,14 @@ static bool boolIsRelevant (BoolPrompt *bp)
             return (false);
     }
 
+    if (bp == &bool_pr[I2CON_BPR]) {
+        #if defined(_I2C_ESP)
+            return (false);
+        #endif
+    }
+
     if (bp == &bool_pr[GPIOOK_BPR]) {
-        #if !defined(_SUPPORT_GPIO) || !defined(_SUPPORT_ENVSENSOR)
+        #if !defined(_SUPPORT_NATIVE_GPIO)
             return (false);
         #endif
     }
@@ -715,6 +1011,20 @@ static bool boolIsRelevant (BoolPrompt *bp)
             return (false);
     }
 
+    #if !defined(_SUPPORT_ADIFILE)
+        // always irrelevant if not supporting ADIF file reading
+        if (bp == &bool_pr[ADIFSET_BPR])
+            return (false);
+    #endif
+
+
+    #if !defined(_SUPPORT_SCROLLLEN)
+        // not allowed to change on ESP
+        if (bp == &bool_pr[SCROLLLEN_BPR] || bp == &bool_pr[SCROLLBIG_BPR])
+            return (false);
+    #endif
+
+    // use by default
     return (true);
 }
 
@@ -736,7 +1046,7 @@ static bool stringIsRelevant (StringPrompt *sp)
     }
 
     if (sp == &string_pr[DXHOST_SPR]) {
-        if (!bool_pr[CLUSTER_BPR].state || bool_pr[CLISWSJTX_BPR].state)
+        if (!bool_pr[CLUSTER_BPR].state)
             return (false);
     }
 
@@ -748,8 +1058,13 @@ static bool stringIsRelevant (StringPrompt *sp)
     if (sp == &string_pr[DXCLCMD0_SPR] || sp == &string_pr[DXCLCMD1_SPR]
                     || sp == &string_pr[DXCLCMD2_SPR] || sp == &string_pr[DXCLCMD3_SPR]
                     || sp == &string_pr[DXLOGIN_SPR]) {
-        // only show if enabled and host is not WSJT
+        // only show if enabled and not using WSJT
         if (!bool_pr[CLUSTER_BPR].state || bool_pr[CLISWSJTX_BPR].state)
+            return (false);
+    }
+
+    if (sp == &string_pr[DXWLIST_SPR]) {
+        if (!bool_pr[CLUSTER_BPR].state)
             return (false);
     }
 
@@ -773,7 +1088,7 @@ static bool stringIsRelevant (StringPrompt *sp)
             return (false);
     }
 
-    if (sp == &string_pr[LAT_SPR] || sp == &string_pr[LNG_SPR]) {
+    if (sp == &string_pr[LAT_SPR] || sp == &string_pr[LNG_SPR] || sp == &string_pr[GRID_SPR]) {
         if (bool_pr[GEOIP_BPR].state || bool_pr[GPSDON_BPR].state)
             return (false);
     }
@@ -783,18 +1098,31 @@ static bool stringIsRelevant (StringPrompt *sp)
             return (false);
     }
 
-    if (sp == &string_pr[TEMPCORR_SPR] || sp == &string_pr[TEMPCORR2_SPR]
-                    || sp == &string_pr[PRESCORR_SPR] || sp == &string_pr[PRESCORR2_SPR]) {
-        #if defined(_SUPPORT_GPIO) && defined(_SUPPORT_ENVSENSOR)
-            return (bool_pr[GPIOOK_BPR].state);
-        #else
+    if (sp == &string_pr[I2CFN_SPR]) {
+        #if defined(_I2C_ESP)
             return (false);
+        #else
+            return (bool_pr[I2CON_BPR].state);
         #endif
+    }
+
+    if (sp == &string_pr[BME76_DT] || sp == &string_pr[BME77_DT]
+                    || sp == &string_pr[BME76_DP] || sp == &string_pr[BME77_DP]) {
+        return (bool_pr[GPIOOK_BPR].state || bool_pr[I2CON_BPR].state);
     }
 
     if (sp == &string_pr[BRMIN_SPR] || sp == &string_pr[BRMAX_SPR])
         return (HAVE_ONOFF());
 
+    if (sp == &string_pr[ADIFFN_SPR]) {
+        // always irrelevant if not supporting ADIF file reading
+        #if defined(_SUPPORT_ADIFILE)
+            if (!bool_pr[ADIFSET_BPR].state)
+        #endif
+                return (false);
+    }
+
+    // no objections
     return (true);
 }
 
@@ -814,6 +1142,7 @@ static void nextTabFocus()
         {       &string_pr[CALL_SPR], NULL},
         {       &string_pr[LAT_SPR], NULL},
         {       &string_pr[LNG_SPR], NULL},
+        {       &string_pr[GRID_SPR], NULL},
         { NULL, &bool_pr[GPSDON_BPR] },
         { NULL, &bool_pr[GPSDFOLLOW_BPR] },
         {       &string_pr[GPSDHOST_SPR], NULL},
@@ -824,23 +1153,18 @@ static void nextTabFocus()
 
         // page 2
 
-        { NULL, &bool_pr[NTPSET_BPR] },
-        {       &string_pr[NTPHOST_SPR], NULL},
         { NULL, &bool_pr[CLUSTER_BPR] },
         { NULL, &bool_pr[CLISWSJTX_BPR] },
-        { NULL, &bool_pr[CLLBL_BPR] },
-        { NULL, &bool_pr[CLLBLCALL_BPR] },
-        { NULL, &bool_pr[CLPATH_BPR] },
+        {       &string_pr[DXWLIST_SPR], NULL},
+        {       &string_pr[DXPORT_SPR], NULL},
+        {       &string_pr[DXHOST_SPR], NULL},
+        {       &string_pr[DXLOGIN_SPR], NULL},
         { NULL, &bool_pr[DXCLCMD0_BPR] },
         {       &string_pr[DXCLCMD0_SPR], NULL},
-        {       &string_pr[DXPORT_SPR], NULL},
-        { NULL, &bool_pr[SETDX_BPR] },
         { NULL, &bool_pr[DXCLCMD1_BPR] },
         {       &string_pr[DXCLCMD1_SPR], NULL},
-        {       &string_pr[DXHOST_SPR], NULL},
         { NULL, &bool_pr[DXCLCMD2_BPR] },
         {       &string_pr[DXCLCMD2_SPR], NULL},
-        {       &string_pr[DXLOGIN_SPR], NULL},
         { NULL, &bool_pr[DXCLCMD3_BPR] },
         {       &string_pr[DXCLCMD3_SPR], NULL},
 
@@ -855,33 +1179,39 @@ static void nextTabFocus()
         { NULL, &bool_pr[FLRIGUSE_BPR] },
         {       &string_pr[FLRIGPORT_SPR], NULL},
         {       &string_pr[FLRIGHOST_SPR], NULL},
+        { NULL, &bool_pr[NTPSET_BPR] },
+        {       &string_pr[NTPHOST_SPR], NULL},
+        { NULL, &bool_pr[ADIFSET_BPR] },
+        {       &string_pr[ADIFFN_SPR], NULL},
 
         // page 4
 
         {       &string_pr[CENTERLNG_SPR], NULL},
         { NULL, &bool_pr[GPIOOK_BPR] },
-        {       &string_pr[TEMPCORR_SPR], NULL},
-        {       &string_pr[PRESCORR_SPR], NULL},
-        {       &string_pr[TEMPCORR2_SPR], NULL},
-        {       &string_pr[PRESCORR2_SPR], NULL},
+        { NULL, &bool_pr[I2CON_BPR] },
+        {       &string_pr[I2CFN_SPR], NULL},
+        {       &string_pr[BME76_DT], NULL},
+        {       &string_pr[BME76_DP], NULL},
+        {       &string_pr[BME77_DT], NULL},
+        {       &string_pr[BME77_DP], NULL},
         { NULL, &bool_pr[KX3ON_BPR] },
-        { NULL, &bool_pr[KX3BAUD_BPR] },
         {       &string_pr[BRMIN_SPR], NULL},
         {       &string_pr[BRMAX_SPR], NULL},
 
         // page 5
 
         { NULL, &bool_pr[DATEFMT_MDY_BPR] },
-        { NULL, &bool_pr[DATEFMT_DMYYMD_BPR] },
         { NULL, &bool_pr[LOGUSAGE_BPR] },
         { NULL, &bool_pr[WEEKDAY1MON_BPR] },
         { NULL, &bool_pr[DEMO_BPR] },
         { NULL, &bool_pr[UNITS_BPR] },
-        { NULL, &bool_pr[X11_FULLSCRN_BPR] },
         { NULL, &bool_pr[BEARING_BPR] },
+        { NULL, &bool_pr[SPOTLBL_BPR] },
+        { NULL, &bool_pr[SPOTPATH_BPR] },
+        { NULL, &bool_pr[SCROLLDIR_BPR] },
+        { NULL, &bool_pr[SCROLLLEN_BPR] },
+        { NULL, &bool_pr[X11_FULLSCRN_BPR] },
         { NULL, &bool_pr[FLIP_BPR] },
-
-        // page 3
     };
     #define N_TAB_FIELDS    NARRAY(tab_fields)
 
@@ -1033,14 +1363,14 @@ static void drawSPPrompt (StringPrompt *sp)
 
 /* erase the prompt of the given StringPrompt
  */
-static void eraseSPPrompt (StringPrompt *sp)
+static void eraseSPPrompt (const StringPrompt *sp)
 {
     fillSBox (sp->p_box, BG_C);
 }
 
 /* erase the value of the given StringPrompt
  */
-static void eraseSPValue (StringPrompt *sp)
+static void eraseSPValue (const StringPrompt *sp)
 {
     fillSBox (sp->v_box, BG_C);
 }
@@ -1221,7 +1551,7 @@ static void drawKeyboard()
 /* convert a screen coord on the virtual keyboard to its char value, if any.
  * N.B. this does NOT handle Delete or Done.
  */
-static bool s2char (SCoord &s, char *cp)
+static bool s2char (SCoord &s, char &kbchar)
 {
     // no KB on color page or onoff page
     if (cur_page == COLOR_PAGE || cur_page == ONOFF_PAGE)
@@ -1239,9 +1569,9 @@ static bool s2char (SCoord &s, char *cp)
                 if (n) {
                     // use shifted char if in top half
                     if (s.y < KB_Y0+row*KB_CHAR_H+KB_CHAR_H/2)
-                        *cp = (char)pgm_read_byte(&kp->shifted);
+                        kbchar = (char)pgm_read_byte(&kp->shifted);
                     else
-                        *cp = n;
+                        kbchar = n;
                     return (true);
                 }
             }
@@ -1250,13 +1580,107 @@ static bool s2char (SCoord &s, char *cp)
 
     // check space bar
     if (inBox (s, space_b)) {
-        *cp = ' ';
+        kbchar = ' ';
         return (true);
     }
 
     // s is not on the virtual keyboard
     return (false);
 }
+
+/* display an entangled pair of bools states:
+ *   if A->t_str 4 states: FF A->f_str TF A->t_str FT B->f_str TT B->t_str
+ *   else        3 state:s FX A->f_str FT B->f_str TT B->t_str
+ * N.B. assumes both A and B's state boxes, ie s_box, are in identical locations.
+ * 3x entangled: a: FX  b: TF  c: TT
+ * 4x entangled: a: FF  b: TF  c: FT  d: TT
+ */
+static void drawEntangledBools (BoolPrompt *A, BoolPrompt *B)
+{
+    if (A->t_str) {
+        // 4-states
+        if (!B->state)
+            drawBPState (A);
+        else {
+            if (!A->state) {
+                // FT: must temporarily turn off B to show its f_str
+                B->state = false;
+                drawBPState (B);
+                B->state = true;
+            } else
+                drawBPState (B);
+        }
+    } else {
+        // 3 states
+        if (A->state)
+            drawBPState (B);
+        else
+            drawBPState (A);
+    }
+}
+
+/* perform action resulting from tapping the given BoolPrompt.
+ * handle both singles and entangled pairs.
+ */
+static void engageBoolTap (BoolPrompt *bp)
+{
+    // erase current cursor position
+    eraseCursor ();
+
+    // update state
+    if (bp->ent_mate == NOMATE) {
+
+        // just a lone bool
+        bp->state = !bp->state;
+        drawBPState (bp);
+
+        // move cursor to tapped field
+        setFocus (NULL, bp);
+        drawCursor ();
+
+    } else {
+
+        // this is one of an entangled pair. N.B. primary is always lower in memory.
+        // 3x entangled: a: FX  b: TF  c: TT
+        // 4x entangled: a: FF  b: TF  c: FT  d: TT
+        BoolPrompt *mate = &bool_pr[bp->ent_mate];
+        BoolPrompt *A = mate < bp ? mate : bp;
+        BoolPrompt *B = mate < bp ? bp : mate;
+
+        // roll choice forward, regardless of which was tapped
+        if (A->t_str) {
+            // 4-states: FF -> TF -> FT -> TT -> ...
+            if (A->state) {
+                A->state = false;
+                B->state = !B->state;
+            } else {
+                A->state = true;
+            };
+                
+        } else {
+            // 3-states: FX -> TF -> TT -> ...
+            if (A->state) {
+                if (B->state) {
+                    A->state = false;
+                    B->state = false;
+                } else {
+                    B->state = true;
+                }
+            } else {
+                A->state = true;
+                B->state = false;
+            }
+        }
+
+        // draw new state
+        drawEntangledBools (A, B);
+
+        // move cursor to Amary field
+        setFocus (NULL, A);
+        drawCursor ();
+    }
+}
+
 
 
 /* find whether s is in any string_pr.
@@ -1320,34 +1744,35 @@ static void getCSelBoxColor (const SCoord &s, uint8_t &r, uint8_t &g, uint8_t &b
 
 /* draw a color selector demo
  */
-static void drawCSelDemoSwatch (const ColSelPrompt *p)
+static void drawCSelDemoSwatch (const ColSelPrompt &p)
 {
-    uint16_t c = RGB565(p->r, p->g, p->b);
+    uint16_t c = RGB565(p.r, p.g, p.b);
 
-    if (p == &csel_pr[SATPATH_CSPR] && csel_satpath_state) {
-        // dashed
+    // check for dashed, else solid
+    if (DASHOK(p) && p.a_state) {
         for (int i = 0; i < CSEL_NDASH; i++) {
-            uint16_t dx = i * p->d_box.w / CSEL_NDASH;
-            tft.fillRect (p->d_box.x + dx, p->d_box.y, p->d_box.w/CSEL_NDASH, p->d_box.h,
+            uint16_t dx = i * p.d_box.w / CSEL_NDASH;
+            tft.fillRect (p.d_box.x + dx, p.d_box.y, p.d_box.w/CSEL_NDASH, p.d_box.h,
                         (i&1) ? RA8875_BLACK : c);
         }
     } else {
-        fillSBox (p->d_box, c);
+        fillSBox (p.d_box, c);
     }
 }
 
-/* draw the csel_satpath tick box
+/* draw the dash control tick box, if used
  */
-static void drawCSelSatPathTickBox()
+static void drawCSelDashTickBox(const ColSelPrompt &p)
 {
-    uint16_t dash_y = csel_satpath_b.y + csel_satpath_b.h/2;
-    fillSBox (csel_satpath_b, csel_satpath_state ? CSEL_TBCOL : RA8875_BLACK);
-    for (int i = 0; i < CSEL_NDASH; i++) {
-        uint16_t dx = i * csel_satpath_b.w / CSEL_NDASH;
-        tft.drawLine (csel_satpath_b.x + dx, dash_y, csel_satpath_b.x + dx + csel_satpath_b.w / CSEL_NDASH, 
-                        dash_y, (i&1) ? RA8875_BLACK : CSEL_TBCOL);
-    }
-    drawSBox (csel_satpath_b, RA8875_WHITE);
+    if (!DASHOK(p))
+        return;
+
+    uint16_t fg = p.a_state ? CSEL_TBCOL : RA8875_BLACK;
+    uint16_t bg = p.a_state ? RA8875_BLACK : CSEL_TBCOL;
+    fillSBox (p.a_box, fg);
+    tft.fillRect (p.a_box.x, p.d_box.y, p.a_box.w/3, p.d_box.h, bg);
+    tft.fillRect (p.a_box.x + 4*p.a_box.w/6, p.d_box.y, p.a_box.w/3, p.d_box.h, bg);
+    drawSBox (p.a_box, RA8875_WHITE);
 }
 
 /* draw a color selector prompt tick box, on or off depending on state.
@@ -1401,6 +1826,7 @@ static void drawCSelPromptColor (const ColSelPrompt &p)
 }
 
 /* draw the one-time color selector GUI features
+ * N.B. we assume screen is already erased.
  */
 static void drawCSelInitGUI()
 {
@@ -1423,19 +1849,17 @@ static void drawCSelInitGUI()
 
     // draw prompts and set sliders from one that is set
     resetWatchdog();
-    tft.setTextColor (PR_C);
     for (int i = 0; i < N_CSPR; i++) {
         ColSelPrompt &p = csel_pr[i];
+        tft.setTextColor (TX_C);
         tft.setCursor (p.p_box.x, p.p_box.y+p.p_box.h-PR_D);
         tft.printf ("%s:", p.p_str);
         drawCSelTickBox (p);
-        drawCSelDemoSwatch (&p);
+        drawCSelDemoSwatch (p);
+        drawCSelDashTickBox(p);
         if (p.state)
             drawCSelPromptColor (p);
     }
-
-    // satpath
-    drawCSelSatPathTickBox();
 }
 
 /* handle a possible touch event while on the color selection page.
@@ -1452,21 +1876,30 @@ static bool handleCSelTouch (SCoord &s)
             if (p.state) {
                 getCSelBoxColor(s, p.r, p.g, p.b);
                 drawCSelPromptColor(p);
-                drawCSelDemoSwatch (&p);
+                drawCSelDemoSwatch (p);
                 break;
             }
         }
         ours = true;
+    }
 
-    // else check for changing satpath dashed
-    } else if (inBox (s, csel_satpath_b)) {
-        csel_satpath_state = !csel_satpath_state;
-        drawCSelDemoSwatch (&csel_pr[SATPATH_CSPR]);
-        drawCSelSatPathTickBox();
-        ours = true;
+    // else check for changing dashed state
+    if (!ours) {
+        for (int i = 0; i < N_CSPR; i++) {
+            ColSelPrompt &p = csel_pr[i];
+            if (DASHOK(p) && inBox (s, p.a_box)) {
+                // toggle and redraw
+                p.a_state = !p.a_state;
+                drawCSelDemoSwatch (p);
+                drawCSelDashTickBox(p);
+                ours = true;
+                break;
+            }
+        }
+    }
 
     // else check for changing the current selection
-    } else {
+    if (!ours) {
         for (int i = 0; i < N_CSPR; i++) {
             ColSelPrompt &pi = csel_pr[i];
             if (inBox (s, pi.t_box) && !pi.state) {
@@ -1526,7 +1959,7 @@ static void drawOnOffTimeCell (int dow, uint16_t y, uint16_t thm)
     char buf[20];
 
     tft.setTextColor(TX_C);
-    sprintf (buf, "%02d:%02d", thm/60, thm%60);
+    snprintf (buf, sizeof(buf), "%02d:%02d", thm/60, thm%60);
     tft.setCursor (OO_DHX(dow)+(OO_CW-getTextWidth(buf))/2, y);
     tft.fillRect (OO_DHX(dow)+1, y-OO_RH+1, OO_CW-2, OO_RH, RA8875_BLACK);
     tft.print (buf);
@@ -1537,7 +1970,9 @@ static void drawOnOffTimeCell (int dow, uint16_t y, uint16_t thm)
 static void drawOnOffControls()
 {
     // title
-    const char *title = brControlOk() ? _FX("Daily Display On/Dim Times") : _FX("Daily Display On/Off Times");
+    const char *title = brDimmableOk()
+                        ? _FX("DE Daily Display On/Dim Times")
+                        : _FX("DE Daily Display On/Off Times");
     tft.setCursor (OO_X0+(OO_TW-getTextWidth(title))/2, OO_Y0-OO_RH-OO_TO);
     tft.setTextColor (PR_C);
     tft.print (title);
@@ -1558,7 +1993,7 @@ static void drawOnOffControls()
     tft.setCursor (OO_X0+2, OO_ONY);
     tft.print (F("On"));
     tft.setCursor (OO_X0+2, OO_OFFY);
-    if (brControlOk())
+    if (brDimmableOk())
         tft.print (F("Dim"));
     else
         tft.print (F("Off"));
@@ -1683,13 +2118,18 @@ static void drawCurrentPageFields()
     // draw relevant bool prompts on this page
     for (int i = 0; i < N_BPR; i++) {
         BoolPrompt *bp = &bool_pr[i];
-        if (boolIsRelevant(bp))
-            drawBPPromptState (bp);
+        if (boolIsRelevant(bp)) {
+            drawBPPrompt (bp);
+            if (bp->ent_mate == i+1)
+                drawEntangledBools(bp, &bool_pr[i+1]);
+            else if (bp->ent_mate == NOMATE)
+                drawBPState (bp);
+        }
     }
 
     // draw spider header if appropriate
     if (cur_page == SPIDER_PAGE && bool_pr[CLUSTER_BPR].state && !bool_pr[CLISWSJTX_BPR].state)
-        drawSpiderCommandsHeader(true);
+        drawSpiderCommandsHeader();
 
     #if defined(_WIFI_ALWAYS)
         // show prompt but otherwise is not relevant
@@ -1773,65 +2213,128 @@ static bool portOK (const char *port_str, int min_port, uint16_t *portp)
 static bool hostOK (char *host_str, int max_len)
 {
     noBlanks(host_str);
+
+    // not too long or too short
     int hl = strlen (host_str);
-    if (hl > max_len-1)
+    if (hl > max_len-1 || hl == 0)
         return (false);
-    bool lh = !strcmp (host_str, "localhost");  // special case
-    char *dot = strchr (host_str, '.');
-    bool dots_ok = dot != NULL && host_str[0] != '.' && host_str[hl-1] != '.';
-    return (lh || dots_ok);
+
+    // localhost?
+    if (!strcmp (host_str, "localhost"))
+        return (true);
+
+    // need at least one dot for TLD or exactly 3 if looks like dotted ip notation
+    int n_dots = 0;
+    int n_digits = 0;
+    int n_other = 0;
+    for (int i = 0; i < hl; i++) {
+        if (host_str[i] == '.')
+            n_dots++;
+        else if (isdigit(host_str[i]))
+            n_digits++;
+        else
+            n_other++;
+    }
+    if (n_dots < 1 || host_str[0] == '.' || host_str[hl-1] == '.')
+        return (false);
+    if (n_other == 0 && (n_dots != 3 || n_digits != hl-3))
+        return (false);
+
+    return (true);
 }
 
-/* validate all string fields, temporarily indicate ones in error if on current page.
- * return whether all ok.
+/* return whether the i2c_fn looks legit
  */
-static bool validateStringPrompts()
+static bool I2CFnOk(void)
+{
+    bool ok = strncmp (i2c_fn, _FX("/dev/"), 5) == 0 && strlen (i2c_fn) > 5;
+
+    #if defined(_IS_UNIX)
+        // on linux actually try to open and lock the same as Wire will do
+        if (ok) {
+            int fd = open (i2c_fn, O_RDWR);
+            if (fd < 0) {
+                Serial.printf (_FX("I2C: %s: %s\n"), i2c_fn, strerror(errno));
+                ok = false;
+            } else {
+                ok = ::flock (fd, LOCK_EX|LOCK_NB) == 0;
+                Serial.printf (_FX("I2C: %s: %s\n"), i2c_fn, ok ? "ok" : strerror(errno));
+                close (fd);
+            }
+        }
+    #endif
+
+    return (ok);
+}
+
+/* return whether dx_login looks ok
+ */
+static bool clusterLoginOk()
+{
+    // must be blank or contain DE call
+    noBlanks(dx_login);
+    return (dx_login[0] == '\0' || strstr (dx_login, call_sign) != NULL);
+}
+
+/* return whether string fields are all valid.
+ * if show_errors then temporarily indicate ones in error.
+ */
+static bool validateStringPrompts (bool show_errors)
 {
     // collect bad ids to flag
     SPIds badsid[N_SPR];
     uint8_t n_badsid = 0;
 
+    // call must not be blank
+    noBlanks(call_sign);
+    if (call_sign[0] == '\0')
+        badsid[n_badsid++] = CALL_SPR;
+
     // check lat/long unless using something else
     if (!bool_pr[GEOIP_BPR].state && !bool_pr[GPSDON_BPR].state) {
 
-        char *lat_str = string_pr[LAT_SPR].v_str;
-        if (!latSpecIsValid (lat_str, de_ll.lat_d))
+        if (!latSpecIsValid (string_pr[LAT_SPR].v_str, de_ll.lat_d))
             badsid[n_badsid++] = LAT_SPR;
 
-        char *lng_str = string_pr[LNG_SPR].v_str;
-        if (!lngSpecIsValid (lng_str, de_ll.lng_d))
+        if (!lngSpecIsValid (string_pr[LNG_SPR].v_str, de_ll.lng_d))
             badsid[n_badsid++] = LNG_SPR;
+
+        LatLong ll;
+        if (!maidenhead2ll (ll, string_pr[GRID_SPR].v_str))
+            badsid[n_badsid++] = GRID_SPR;
     }
 
     // check cluster info if used
     if (bool_pr[CLUSTER_BPR].state) {
         char *clhost = string_pr[DXHOST_SPR].v_str;
-        if (!hostOK(clhost,NV_DXHOST_LEN) && !bool_pr[CLISWSJTX_BPR].state)
+        if (!hostOK(clhost,NV_DXHOST_LEN))
             badsid[n_badsid++] = DXHOST_SPR;
-        if (!portOK (string_pr[DXPORT_SPR].v_str, 23, &dxport))         // 23 is telnet
+        if (!portOK (string_pr[DXPORT_SPR].v_str, 23, &dx_port))        // 23 is telnet
             badsid[n_badsid++] = DXPORT_SPR;
+        if (!bool_pr[CLISWSJTX_BPR].state && !clusterLoginOk())         // no used with wsjt
+            badsid[n_badsid++] = DXLOGIN_SPR;
 
         // clean up any extra white space in the commands then check for blank entries that are on
         for (int i = 0; i < N_DXCLCMDS; i++) {
-            memmove (dxcl_cmds[i], trim(dxcl_cmds[i]), NV_DXCLCMD_LEN);
+            trim(dxcl_cmds[i]);
             if (strlen(dxcl_cmds[i]) == 0 && bool_pr[DXCLCMD0_BPR+i].state)
                 badsid[n_badsid++] = (SPIds)(DXCLCMD0_SPR+i);
         }
     }
 
-    // check righost and port if used
+    // check rig_host and port if used
     if (bool_pr[RIGUSE_BPR].state) {
         if (!hostOK(string_pr[RIGHOST_SPR].v_str,NV_RIGHOST_LEN))
             badsid[n_badsid++] = RIGHOST_SPR;
-        if (!portOK (string_pr[RIGPORT_SPR].v_str, 1000, &rigport))
+        if (!portOK (string_pr[RIGPORT_SPR].v_str, 1000, &rig_port))
             badsid[n_badsid++] = RIGPORT_SPR;
     }
 
-    // check rothost and port if used
+    // check rot_host and port if used
     if (bool_pr[ROTUSE_BPR].state) {
         if (!hostOK(string_pr[ROTHOST_SPR].v_str,NV_ROTHOST_LEN))
             badsid[n_badsid++] = ROTHOST_SPR;
-        if (!portOK (string_pr[ROTPORT_SPR].v_str, 1000, &rotport))
+        if (!portOK (string_pr[ROTPORT_SPR].v_str, 1000, &rot_port))
             badsid[n_badsid++] = ROTPORT_SPR;
     }
 
@@ -1839,29 +2342,29 @@ static bool validateStringPrompts()
     if (bool_pr[FLRIGUSE_BPR].state) {
         if (!hostOK(string_pr[FLRIGHOST_SPR].v_str,NV_FLRIGHOST_LEN))
             badsid[n_badsid++] = FLRIGHOST_SPR;
-        if (!portOK (string_pr[FLRIGPORT_SPR].v_str, 1000, &flrigport))
+        if (!portOK (string_pr[FLRIGPORT_SPR].v_str, 1000, &flrig_port))
             badsid[n_badsid++] = FLRIGPORT_SPR;
     }
 
-    // check for plausible temperature and pressure corrections if used
-    if (bool_pr[GPIOOK_BPR].state) {
-        char *tc_str = string_pr[TEMPCORR_SPR].v_str;
+    // check for plausible temperature and pressure corrections and file name if used
+    if (bool_pr[GPIOOK_BPR].state || bool_pr[I2CON_BPR].state) {
+        char *tc_str = string_pr[BME76_DT].v_str;
         temp_corr[BME_76] = atof (tc_str);
         if (fabsf(temp_corr[BME_76]) > MAX_BME_DTEMP)
-            badsid[n_badsid++] = TEMPCORR_SPR;
-        char *tc2_str = string_pr[TEMPCORR2_SPR].v_str;
+            badsid[n_badsid++] = BME76_DT;
+        char *tc2_str = string_pr[BME77_DT].v_str;
         temp_corr[BME_77] = atof (tc2_str);
         if (fabsf(temp_corr[BME_77]) > MAX_BME_DTEMP)
-            badsid[n_badsid++] = TEMPCORR2_SPR;
+            badsid[n_badsid++] = BME77_DT;
 
-        char *pc_str = string_pr[PRESCORR_SPR].v_str;
+        char *pc_str = string_pr[BME76_DP].v_str;
         pres_corr[BME_76] = atof (pc_str);
         if (fabsf(pres_corr[BME_76]) > MAX_BME_DPRES)
-            badsid[n_badsid++] = PRESCORR_SPR;
-        char *pc2_str = string_pr[PRESCORR2_SPR].v_str;
+            badsid[n_badsid++] = BME76_DP;
+        char *pc2_str = string_pr[BME77_DP].v_str;
         pres_corr[BME_77] = atof (pc2_str);
         if (fabsf(pres_corr[BME_77]) > MAX_BME_DPRES)
-            badsid[n_badsid++] = PRESCORR2_SPR;
+            badsid[n_badsid++] = BME77_DP;
     }
 
     // require ssid and pw if wifi
@@ -1883,14 +2386,14 @@ static bool validateStringPrompts()
             badsid[n_badsid++] = GPSDHOST_SPR;
     }
 
-    // require plausible ntp host name if used
+    // require plausible ntp host name or a few special cases if used
     if (bool_pr[NTPSET_BPR].state) {
-        if (!hostOK(string_pr[NTPHOST_SPR].v_str,NV_NTPHOST_LEN))
+        if (!hostOK(string_pr[NTPHOST_SPR].v_str,NV_NTPHOST_LEN) && !useOSTime())
             badsid[n_badsid++] = NTPHOST_SPR;
     }
 
     // require both brightness 0..100 and min < max.
-    if (brControlOk()) {
+    if (brDimmableOk()) {
         // Must use ints to check for < 0
         int brmn = atoi (string_pr[BRMIN_SPR].v_str);
         int brmx = atoi (string_pr[BRMAX_SPR].v_str);
@@ -1914,9 +2417,26 @@ static bool validateStringPrompts()
     else
         badsid[n_badsid++] = CENTERLNG_SPR;
 
-    // indicate any values in error, changing pages if necessary
-    if (n_badsid > 0) {
+    // ADIF file name must not be blank if used
+    if (bool_pr[ADIFSET_BPR].state) {
+        trim (adif_fn);
+        if (adif_fn[0] == '\0')
+            badsid[n_badsid++] = ADIFFN_SPR;
+    }
 
+    // check I2C file name
+    if (bool_pr[I2CON_BPR].state) {
+        trim (i2c_fn);
+        if (!I2CFnOk())
+            badsid[n_badsid++] = I2CFN_SPR;
+    }
+
+    // if not showing, just return whether all ok
+    if (!show_errors)
+        return (n_badsid == 0);
+
+    // if any bad indicate values in error, changing pages if necessary
+    if (n_badsid > 0) {
 
         // starting with the current page, search for first page with any bad fields
 
@@ -1942,15 +2462,11 @@ static bool validateStringPrompts()
             if (bad_page != cur_page)
                 changePage(bad_page);
 
-            // flag each erroneous value
+            // flag each erroneous value on this page
             for (int i = 0; i < n_badsid; i++) {
                 StringPrompt *sp = &string_pr[badsid[i]];
-                if (sp->page == cur_page) {
-                    eraseSPValue (sp);
-                    tft.setTextColor (ERR_C);
-                    tft.setCursor (sp->v_box.x, sp->v_box.y+sp->v_box.h-PR_D);
-                    tft.print (F("Err"));
-                }
+                if (sp->page == cur_page) 
+                    flagErrField (sp);
             }
 
             // dwell error flag(s)
@@ -1989,7 +2505,7 @@ static bool getWPA()
     static const char wpa_fn[] = "/etc/wpa_supplicant/wpa_supplicant.conf";
     FILE *fp = fopen (wpa_fn, "r");
     if (!fp) {
-        printf ("%s: %s\n", wpa_fn, strerror(errno));
+        Serial.printf ("%s: %s\n", wpa_fn, strerror(errno));
         return (false);
     }
 
@@ -2009,11 +2525,11 @@ static bool getWPA()
     // save if found both
     if (found_ssid && found_psk) {
         wpa_ssid[NV_WIFI_SSID_LEN-1] = '\0';
-        strcpy (wifissid, wpa_ssid);
-        NVWriteString(NV_WIFI_SSID, wifissid);
+        strcpy (wifi_ssid, wpa_ssid);
+        NVWriteString(NV_WIFI_SSID, wifi_ssid);
         wpa_psk[NV_WIFI_PW_LEN-1] = '\0';
-        strcpy (wifipw, wpa_psk);
-        NVWriteString(NV_WIFI_PASSWD, wifipw);
+        strcpy (wifi_pw, wpa_psk);
+        NVWriteString(NV_WIFI_PASSWD, wifi_pw);
         return (true);
     }
 
@@ -2034,31 +2550,27 @@ static void initSetup()
 {
     // init wifi, accept OLD PW if valid
 
-    if (!getWPA() && !NVReadString(NV_WIFI_SSID, wifissid)) {
-        strncpy (wifissid, DEF_SSID, NV_WIFI_SSID_LEN-1);
-        NVWriteString(NV_WIFI_SSID, wifissid);
+    if (!getWPA() && !NVReadString(NV_WIFI_SSID, wifi_ssid)) {
+        strncpy (wifi_ssid, DEF_SSID, NV_WIFI_SSID_LEN-1);
+        NVWriteString(NV_WIFI_SSID, wifi_ssid);
     }
-    if (!NVReadString(NV_WIFI_PASSWD, wifipw) && !NVReadString(NV_WIFI_PASSWD_OLD, wifipw)) {
-        strncpy (wifipw, DEF_PASS, NV_WIFI_PW_LEN-1);
-        NVWriteString(NV_WIFI_PASSWD, wifipw);
-    }
-
-
-
-    // init call sign
-
-    if (!NVReadString(NV_CALLSIGN, callsign)) {
-        strncpy (callsign, DEF_CALL, NV_CALLSIGN_LEN-1);
-        NVWriteString(NV_CALLSIGN, callsign);
+    if (!NVReadString(NV_WIFI_PASSWD, wifi_pw) && !NVReadString(NV_WIFI_PASSWD_OLD, wifi_pw)) {
+        strncpy (wifi_pw, DEF_PASS, NV_WIFI_PW_LEN-1);
+        NVWriteString(NV_WIFI_PASSWD, wifi_pw);
     }
 
+
+
+    // init call sign, no default
+
+    NVReadString(NV_CALLSIGN, call_sign);
 
 
     // init gpsd host and option
 
-    if (!NVReadString (NV_GPSDHOST, gpsdhost)) {
-        strcpy (gpsdhost, "localhost");
-        NVWriteString (NV_GPSDHOST, gpsdhost);
+    if (!NVReadString (NV_GPSDHOST, gpsd_host)) {
+        strcpy (gpsd_host, "localhost");
+        NVWriteString (NV_GPSDHOST, gpsd_host);
     }
     uint8_t nv_gpsd;
     if (!NVReadUInt8 (NV_USEGPSD, &nv_gpsd)) {
@@ -2074,9 +2586,9 @@ static void initSetup()
 
     // init ntp host and option
 
-    if (!NVReadString (NV_NTPHOST, ntphost)) {
-        ntphost[0] = '\0';
-        NVWriteString (NV_NTPHOST, ntphost);
+    if (!NVReadString (NV_NTPHOST, ntp_host)) {
+        ntp_host[0] = '\0';
+        NVWriteString (NV_NTPHOST, ntp_host);
     }
     uint8_t nv_ntp;
     if (!NVReadUInt8 (NV_NTPSET, &nv_ntp)) {
@@ -2085,16 +2597,44 @@ static void initSetup()
     } else
         bool_pr[NTPSET_BPR].state = (nv_ntp != 0);
 
+    // init ADIF
+
+    if (!NVReadString (NV_ADIFFN, adif_fn)) {
+        adif_fn[0] = '\0';
+        NVWriteString (NV_ADIFFN, adif_fn);
+    }
+    bool_pr[ADIFSET_BPR].state = adif_fn[0] != '\0';
+
+    // init I2C
+
+    if (!NVReadString (NV_I2CFN, i2c_fn)) {
+        // supply a reasonable system-dependent default
+        #if defined (_I2C_FREEBSD)
+            strcpy (i2c_fn, _FX("/dev/iic0"));
+        #elif defined (_I2C_LINUX)
+            strcpy (i2c_fn, _FX("/dev/i2c-1"));
+        #else
+            i2c_fn[0] = '\0';
+        #endif
+        NVWriteString (NV_I2CFN, i2c_fn);
+    }
+    uint8_t i2c_on;
+    if (!NVReadUInt8 (NV_I2CON, &i2c_on)) {
+        i2c_on = 0;
+        NVWriteUInt8 (NV_I2CON, i2c_on);
+    }
+    bool_pr[I2CON_BPR].state = (i2c_on != 0);
+
 
     // init rigctld host, port and option
 
-    if (!NVReadString (NV_RIGHOST, righost)) {
-        strcpy (righost, "localhost");
-        NVWriteString (NV_RIGHOST, righost);
+    if (!NVReadString (NV_RIGHOST, rig_host)) {
+        strcpy (rig_host, "localhost");
+        NVWriteString (NV_RIGHOST, rig_host);
     }
-    if (!NVReadUInt16(NV_RIGPORT, &rigport)) {
-        rigport = 4532;
-        NVWriteUInt16(NV_RIGPORT, rigport);
+    if (!NVReadUInt16(NV_RIGPORT, &rig_port)) {
+        rig_port = 4532;
+        NVWriteUInt16(NV_RIGPORT, rig_port);
     }
     uint8_t nv_rig;
     if (!NVReadUInt8 (NV_RIGUSE, &nv_rig)) {
@@ -2106,13 +2646,13 @@ static void initSetup()
 
     // init rotctld host, port and option
 
-    if (!NVReadString (NV_ROTHOST, rothost)) {
-        strcpy (rothost, "localhost");
-        NVWriteString (NV_ROTHOST, rothost);
+    if (!NVReadString (NV_ROTHOST, rot_host)) {
+        strcpy (rot_host, "localhost");
+        NVWriteString (NV_ROTHOST, rot_host);
     }
-    if (!NVReadUInt16(NV_ROTPORT, &rotport)) {
-        rotport = 4533;
-        NVWriteUInt16(NV_ROTPORT, rotport);
+    if (!NVReadUInt16(NV_ROTPORT, &rot_port)) {
+        rot_port = 4533;
+        NVWriteUInt16(NV_ROTPORT, rot_port);
     }
     uint8_t nv_rot;
     if (!NVReadUInt8 (NV_ROTUSE, &nv_rot)) {
@@ -2124,13 +2664,13 @@ static void initSetup()
 
     // init flrig host, port and option
 
-    if (!NVReadString (NV_FLRIGHOST, flrighost)) {
-        strcpy (flrighost, "localhost");
-        NVWriteString (NV_FLRIGHOST, flrighost);
+    if (!NVReadString (NV_FLRIGHOST, flrig_host)) {
+        strcpy (flrig_host, "localhost");
+        NVWriteString (NV_FLRIGHOST, flrig_host);
     }
-    if (!NVReadUInt16(NV_FLRIGPORT, &flrigport)) {
-        flrigport = 12345;
-        NVWriteUInt16(NV_FLRIGPORT, flrigport);
+    if (!NVReadUInt16(NV_FLRIGPORT, &flrig_port)) {
+        flrig_port = 12345;
+        NVWriteUInt16(NV_FLRIGPORT, flrig_port);
     }
     uint8_t nv_flrig;
     if (!NVReadUInt8 (NV_FLRIGUSE, &nv_flrig)) {
@@ -2143,17 +2683,17 @@ static void initSetup()
 
     // init dx cluster info
 
-    if (!NVReadString(NV_DXHOST, dxhost)) {
-        memset (dxhost, 0, sizeof(dxhost));
-        NVWriteString(NV_DXHOST, dxhost);
+    if (!NVReadString(NV_DXHOST, dx_host)) {
+        memset (dx_host, 0, sizeof(dx_host));
+        NVWriteString(NV_DXHOST, dx_host);
     }
-    if (!NVReadString(NV_DXLOGIN, dxlogin)) {
-        strcpy (dxlogin, callsign);      // default to call
-        NVWriteString(NV_DXLOGIN, dxlogin);
+    if (!NVReadString(NV_DXLOGIN, dx_login) || !clusterLoginOk()) {
+        strcpy (dx_login, call_sign);      // default to call
+        NVWriteString(NV_DXLOGIN, dx_login);
     }
-    if (!NVReadUInt16(NV_DXPORT, &dxport)) {
-        dxport = 0;
-        NVWriteUInt16(NV_DXPORT, dxport);
+    if (!NVReadUInt16(NV_DXPORT, &dx_port)) {
+        dx_port = 0;
+        NVWriteUInt16(NV_DXPORT, dx_port);
     }
     if (!NVReadString(NV_DXCMD0, dxcl_cmds[0])) {
         memset (dxcl_cmds[0], 0, sizeof(dxcl_cmds[0]));
@@ -2171,14 +2711,18 @@ static void initSetup()
         memset (dxcl_cmds[3], 0, sizeof(dxcl_cmds[3]));
         NVWriteString(NV_DXCMD3, dxcl_cmds[3]);
     }
+    if (!NVReadString(NV_DXWLIST, dx_wlist)) {
+        memset (dx_wlist, 0, sizeof(dx_wlist));
+        NVWriteString(NV_DXWLIST, dx_wlist);
+    }
 
     uint8_t nv_wsjt;
     if (!NVReadUInt8 (NV_WSJT_DX, &nv_wsjt)) {
         // check host for possible backwards compat
-        if (strcasecmp(dxhost,"WSJT-X") == 0 || strcasecmp(dxhost,"JTDX") == 0) {
+        if (strcasecmp(dx_host,"WSJT-X") == 0 || strcasecmp(dx_host,"JTDX") == 0) {
             nv_wsjt = 1;
-            memset (dxhost, 0, sizeof(dxhost));
-            NVWriteString(NV_DXHOST, dxhost);
+            memset (dx_host, 0, sizeof(dx_host));
+            NVWriteString(NV_DXHOST, dx_host);
         } else
             nv_wsjt = 0;
         NVWriteUInt8 (NV_WSJT_DX, nv_wsjt);
@@ -2192,31 +2736,26 @@ static void initSetup()
     }
     bool_pr[CLUSTER_BPR].state = (nv_dx != 0);
 
-    uint8_t clmap;
-    if (!NVReadUInt8 (NV_MAPSPOTS, &clmap)) {
-        clmap = NVMS_NONE;
-        NVWriteUInt8 (NV_MAPSPOTS, clmap);
+    uint8_t spotops;
+    if (!NVReadUInt8 (NV_MAPSPOTS, &spotops)) {
+        spotops = NVMS_PREFIX | NVMS_THIN;
+        NVWriteUInt8 (NV_MAPSPOTS, spotops);
     }
+    uint8_t spotops_msk = spotops & NVMS_MKMSK;
+    bool_pr[SPOTLBL_BPR].state =     spotops_msk == NVMS_DOT || spotops_msk == NVMS_CALL;
+    bool_pr[SPOTLBLCALL_BPR].state = spotops_msk == NVMS_PREFIX || spotops_msk == NVMS_CALL;
+    bool_pr[SPOTPATH_BPR].state =    (spotops & (NVMS_WIDE|NVMS_THIN)) != 0;
+    bool_pr[SPOTPATHSZ_BPR].state =  (spotops & NVMS_WIDE) != 0;
 
-    uint8_t nv_setdx;
-    if (!NVReadUInt8 (NV_WSJT_SETSDX, &nv_setdx)) {
-        nv_setdx = false;
-        NVWriteUInt8 (NV_WSJT_SETSDX, nv_setdx);
+    uint8_t dx_cmdmask;
+    if (!NVReadUInt8 (NV_DXCMDUSED, &dx_cmdmask)) {
+        dx_cmdmask = 0;
+        NVWriteUInt8 (NV_DXCMDUSED, dx_cmdmask);
     }
-    bool_pr[SETDX_BPR].state = (nv_setdx != 0);
-
-    bool_pr[CLLBL_BPR].state = ((clmap & NVMS_PCMASK) != NVMS_NONE);
-    bool_pr[CLLBLCALL_BPR].state = ((clmap & NVMS_PCMASK) == NVMS_CALL);
-    bool_pr[CLPATH_BPR].state = (clmap & NVMS_PATH) != 0;
-    uint8_t dx_use_mask;
-    if (!NVReadUInt8 (NV_DXCMDUSED, &dx_use_mask)) {
-        dx_use_mask = 0;
-        NVWriteUInt8 (NV_DXCMDUSED, dx_use_mask);
-    }
-    bool_pr[DXCLCMD0_BPR].state = (dx_use_mask & 1) != 0;
-    bool_pr[DXCLCMD1_BPR].state = (dx_use_mask & 2) != 0;
-    bool_pr[DXCLCMD2_BPR].state = (dx_use_mask & 4) != 0;
-    bool_pr[DXCLCMD3_BPR].state = (dx_use_mask & 8) != 0;
+    bool_pr[DXCLCMD0_BPR].state = (dx_cmdmask & 1) != 0;
+    bool_pr[DXCLCMD1_BPR].state = (dx_cmdmask & 2) != 0;
+    bool_pr[DXCLCMD2_BPR].state = (dx_cmdmask & 4) != 0;
+    bool_pr[DXCLCMD3_BPR].state = (dx_cmdmask & 8) != 0;
 
 
 
@@ -2289,13 +2828,31 @@ static void initSetup()
         p.b = RGB565_B(c);
     }
 
-    // dashed
+    // dashed settings
     uint32_t dashed;
     if (!NVReadUInt32 (NV_DASHED, &dashed)) {
         dashed = 0;
         NVWriteUInt32 (NV_DASHED, dashed);
     }
-    csel_satpath_state = (dashed & (1 << SATPATH_CSPR)) ? true : false;
+    for (int i = 0; i < N_CSPR; i++)
+        csel_pr[i].a_state = (dashed & (1 << i)) ? true : false;
+
+#if defined (_IS_ESP8266)
+    // ESP does not support paths period, let alone dashed paths
+    NODASH (csel_pr[BAND160_CSPR]);
+    NODASH (csel_pr[BAND80_CSPR]);
+    NODASH (csel_pr[BAND60_CSPR]);
+    NODASH (csel_pr[BAND40_CSPR]);
+    NODASH (csel_pr[BAND30_CSPR]);
+    NODASH (csel_pr[BAND20_CSPR]);
+    NODASH (csel_pr[BAND17_CSPR]);
+    NODASH (csel_pr[BAND15_CSPR]);
+    NODASH (csel_pr[BAND12_CSPR]);
+    NODASH (csel_pr[BAND10_CSPR]);
+    NODASH (csel_pr[BAND6_CSPR]);
+    NODASH (csel_pr[BAND2_CSPR]);
+#endif
+
 
     // X11 flags, engage immediately if defined or sensible thing to do
     uint16_t x11flags;
@@ -2409,21 +2966,21 @@ static void initSetup()
         NVWriteUInt8 (NV_NAMES_ON, names_on);
     }
 
-    if (!NVReadFloat (NV_TEMPCORR, &temp_corr[BME_76])) {
+    if (!NVReadFloat (NV_TEMPCORR76, &temp_corr[BME_76])) {
         temp_corr[BME_76] = 0;
-        NVWriteFloat (NV_TEMPCORR, temp_corr[BME_76]);
+        NVWriteFloat (NV_TEMPCORR76, temp_corr[BME_76]);
     }
-    if (!NVReadFloat (NV_PRESCORR, &pres_corr[BME_76])) {
+    if (!NVReadFloat (NV_PRESCORR76, &pres_corr[BME_76])) {
         pres_corr[BME_76] = 0;
-        NVWriteFloat (NV_PRESCORR, pres_corr[BME_76]);
+        NVWriteFloat (NV_PRESCORR76, pres_corr[BME_76]);
     }
-    if (!NVReadFloat (NV_TEMPCORR2, &temp_corr[BME_77])) {
+    if (!NVReadFloat (NV_TEMPCORR77, &temp_corr[BME_77])) {
         temp_corr[BME_77] = 0;
-        NVWriteFloat (NV_TEMPCORR2, temp_corr[BME_77]);
+        NVWriteFloat (NV_TEMPCORR77, temp_corr[BME_77]);
     }
-    if (!NVReadFloat (NV_PRESCORR2, &pres_corr[BME_77])) {
+    if (!NVReadFloat (NV_PRESCORR77, &pres_corr[BME_77])) {
         pres_corr[BME_77] = 0;
-        NVWriteFloat (NV_PRESCORR2, pres_corr[BME_77]);
+        NVWriteFloat (NV_PRESCORR77, pres_corr[BME_77]);
     }
 
     bool_pr[GEOIP_BPR].state = false;
@@ -2436,6 +2993,45 @@ static void initSetup()
         bright_max = 100;
         NVWriteUInt8 (NV_BR_MAX, bright_max);
     }
+
+    uint8_t scroll_dir;
+    if (!NVReadUInt8 (NV_SCROLLDIR, &scroll_dir)) {
+        scroll_dir = 0;
+        NVWriteUInt8 (NV_SCROLLDIR, scroll_dir);
+    }
+    bool_pr[SCROLLDIR_BPR].state = (scroll_dir != 0);
+
+
+    #if defined(_SUPPORT_SCROLLLEN)
+        uint8_t scroll_len;
+        if (!NVReadUInt8 (NV_SCROLLLEN, &scroll_len)) {
+            scroll_len = NSCROLL_C;
+            NVWriteUInt8 (NV_SCROLLLEN, scroll_len);
+        }
+
+        // entangled: 0: FF  10: TF   25: TT  50: FT
+        if (scroll_len < NSCROLL_B) {
+            // NSCROLL_A
+            bool_pr[SCROLLLEN_BPR].state = false;
+            bool_pr[SCROLLBIG_BPR].state = false;
+        } else if (scroll_len < NSCROLL_C) {
+            // NSCROLL_B
+            bool_pr[SCROLLLEN_BPR].state = true;
+            bool_pr[SCROLLBIG_BPR].state = false;
+        } else if (scroll_len < NSCROLL_D) {
+            // NSCROLL_C
+            bool_pr[SCROLLLEN_BPR].state = false;
+            bool_pr[SCROLLBIG_BPR].state = true;
+        } else {
+            // NSCROLL_D
+            bool_pr[SCROLLLEN_BPR].state = true;
+            bool_pr[SCROLLBIG_BPR].state = true;
+        }
+    #else
+        // always force to zero
+        NVWriteUInt8 (NV_SCROLLLEN, 0);
+        bool_pr[SCROLLLEN_BPR].state = bool_pr[SCROLLBIG_BPR].state = false;
+    #endif
 }
 
 
@@ -2452,9 +3048,9 @@ static bool askRun()
 
     // appropriate prompt
 #if defined(_IS_ESP8266)
-    tft.print (F("Tap anywhere to enter Setup screen ... "));
+    tft.print (F("Tap anywhere to enter Setup ... "));
 #else
-    tft.print (F("Click anywhere to enter Setup screen ... "));
+    tft.print (F("Click anywhere to enter Setup ... "));
 #endif // _IS_ESP8266
 
     int16_t x = tft.getCursorX();
@@ -2468,12 +3064,13 @@ static bool askRun()
             tft.print((to+9)/10);
         }
 
-        // check for touch or abort box
+        // check for touch, type ESC or abort box
         SCoord s;
         TouchType tt = readCalTouchWS (s);
-        if (tt != TT_NONE || tft.getChar()) {
+        char c = tft.getChar (NULL, NULL);
+        if (tt != TT_NONE || c) {
             drainTouch();
-            if (tt != TT_NONE && inBox (s, skip_b)) {
+            if (c == 27 || (tt != TT_NONE && inBox (s, skip_b))) {
                 drawStringInBox ("Skip", skip_b, true, TX_C);
                 return (false);
             }
@@ -2491,7 +3088,6 @@ static bool askRun()
 
 
 /* init display and supporting StringPrompt and BoolPrompt data structs
- * N.B. must call finishSettingUp() when done
  */
 static void initDisplay()
 {
@@ -2501,39 +3097,11 @@ static void initDisplay()
     // set invalid page
     cur_page = -1;
 
-    // init shadow strings. N.B. free() before leaving
-    snprintf (string_pr[LAT_SPR].v_str = (char*)malloc(8), string_pr[LAT_SPR].v_len = 8,
-                                        "%.2f%c", fabsf(de_ll.lat_d), de_ll.lat_d < 0 ? 'S' : 'N');
-    snprintf (string_pr[LNG_SPR].v_str = (char*)malloc(9), string_pr[LNG_SPR].v_len = 9,
-                                        "%.2f%c", fabsf(de_ll.lng_d), de_ll.lng_d < 0 ? 'W' : 'E');
-    snprintf (string_pr[DXPORT_SPR].v_str = (char*)malloc(8), string_pr[DXPORT_SPR].v_len = 8,
-                                        "%u", dxport);
-    snprintf (string_pr[RIGPORT_SPR].v_str = (char*)malloc(8), string_pr[RIGPORT_SPR].v_len = 8,
-                                        "%u", rigport);
-    snprintf (string_pr[ROTPORT_SPR].v_str = (char*)malloc(8), string_pr[ROTPORT_SPR].v_len = 8,
-                                        "%u", rotport);
-    snprintf (string_pr[FLRIGPORT_SPR].v_str = (char*)malloc(8), string_pr[FLRIGPORT_SPR].v_len = 8,
-                                        "%u", flrigport);
-    snprintf (string_pr[TEMPCORR_SPR].v_str = (char*)malloc(8), string_pr[TEMPCORR_SPR].v_len = 8,
-                                        "%.2f", temp_corr[BME_76]);
-    snprintf (string_pr[PRESCORR_SPR].v_str = (char*)malloc(8), string_pr[PRESCORR_SPR].v_len = 8,
-                                        "%.3f", pres_corr[BME_76]);
-    snprintf (string_pr[TEMPCORR2_SPR].v_str = (char*)malloc(8), string_pr[TEMPCORR2_SPR].v_len = 8,
-                                        "%.2f", temp_corr[BME_77]);
-    snprintf (string_pr[PRESCORR2_SPR].v_str = (char*)malloc(8), string_pr[PRESCORR2_SPR].v_len = 8,
-                                        "%.3f", pres_corr[BME_77]);
-    snprintf (string_pr[BRMIN_SPR].v_str = (char*)malloc(8), string_pr[BRMIN_SPR].v_len = 8,
-                                        "%u", bright_min);
-    snprintf (string_pr[BRMAX_SPR].v_str = (char*)malloc(8), string_pr[BRMAX_SPR].v_len = 8,
-                                        "%u", bright_max);
-    snprintf (string_pr[CENTERLNG_SPR].v_str = (char*)malloc(5), string_pr[CENTERLNG_SPR].v_len = 5,
-                                        "%.0f%c", fabsf((float)center_lng), center_lng < 0 ? 'W' : 'E');
-                                        // conversion to float just to avoid g++ snprintf size warning
 
 #if defined(_SHOW_ALL) || defined(_MARK_BOUNDS)
     // don't show my creds when testing
-    strcpy (wifissid, _FX("mywifissid"));
-    strcpy (wifipw, _FX("mywifipassword"));
+    strcpy (wifi_ssid, _FX("mywifissid"));
+    strcpy (wifi_pw, _FX("mywifipassword"));
 #endif
 
     // force drawing first page
@@ -2541,14 +3109,18 @@ static void initDisplay()
     changePage(0);
 }
 
-/* display an entangled pair of bools states: show A state if off else B state
- */
-static void drawBoolPairState (BPIds A, BPIds B)
+static void drawBMEPrompts (bool on)
 {
-    if (bool_pr[A].state) {
-        drawBPState (&bool_pr[B]);
+    if (on) {
+        drawSPPromptValue (&string_pr[BME76_DT]);
+        drawSPPromptValue (&string_pr[BME76_DP]);
+        drawSPPromptValue (&string_pr[BME77_DT]);
+        drawSPPromptValue (&string_pr[BME77_DP]);
     } else {
-        drawBPState (&bool_pr[A]);
+        eraseSPPromptValue (&string_pr[BME76_DT]);
+        eraseSPPromptValue (&string_pr[BME76_DP]);
+        eraseSPPromptValue (&string_pr[BME77_DT]);
+        eraseSPPromptValue (&string_pr[BME77_DP]);
     }
 }
 
@@ -2558,34 +3130,32 @@ static void runSetup()
 {
     drainTouch();
 
+    SBox screen;
+    screen.x = 0;
+    screen.y = 0;
+    screen.w = tft.width();
+    screen.h = tft.height();
+
     SCoord s;
     char c;
+    UserInput ui = {
+        screen,
+        NULL,
+        false,
+        0,
+        false,
+        s,
+        c,
+    };
 
     do {
         StringPrompt *sp;
-        BoolPrompt *bp;
+        BoolPrompt *bp = NULL;
 
         // wait for next tap or character input
-        for (;;) {
-
-            // if touch try to also find what char it might be from virtual kb
-            if (readCalTouchWS(s) != TT_NONE) {
-                if (!s2char (s, &c))
-                    c = 0;
-                break;
-            }
-
-            // if real kb input, invalidate touch location
-            c = tft.getChar();
-            if (c) {
-                s.x = s.y = 0;
-                break;
-            }
-
-            // neither, wait and repeat
-            resetWatchdog();
-            wdDelay(10);
-        }
+        (void) waitForUser(ui);
+        if (!ui.kbchar)
+            (void) s2char (ui.tap, ui.kbchar);
 
         // process special cases first
 
@@ -2634,6 +3204,7 @@ static void runSetup()
             StringPrompt *sp = cur_focus.sp;
             size_t vl = strlen (sp->v_str);
             if (vl > 0) {
+
                 // erase cursor, shorten string, find new width, erase to end, redraw
                 eraseCursor ();
                 sp->v_str[vl-1] = '\0';
@@ -2642,7 +3213,7 @@ static void runSetup()
                 drawSPValue (sp);
                 drawCursor ();
 
-                checkLLEdit(sp);
+                checkLLGEdit(sp);
             }
 
 
@@ -2664,7 +3235,7 @@ static void runSetup()
                 drawSPValue (sp);
                 drawCursor ();
 
-                checkLLEdit(sp);
+                checkLLGEdit(sp);
             }
 
         } else if (tappedBool (s, &bp) || (c == ' ' && cur_focus.bp)) {
@@ -2674,24 +3245,15 @@ static void runSetup()
                 bp = cur_focus.bp;
 
             // ignore tapping on bools not being shown
-            if (!boolIsRelevant(bp))
+            if (!bp || !boolIsRelevant(bp))
                 continue;
 
-            // move focus here
-            eraseCursor ();
-            setFocus (NULL, bp);
-
             // toggle and redraw with new cursor position
-            bp->state = !bp->state;
-            drawBPState (bp);
-            drawCursor ();
+            engageBoolTap (bp);
 
             // check for possible secondary implications
 
-            if (bp == &bool_pr[DATEFMT_MDY_BPR]) {
-                drawBoolPairState(DATEFMT_MDY_BPR, DATEFMT_DMYYMD_BPR);
-
-            } else if (bp == &bool_pr[X11_FULLSCRN_BPR]) {
+            if (bp == &bool_pr[X11_FULLSCRN_BPR]) {
 
                 // check for full screen that won't fit
                 if (bp->state) {
@@ -2710,20 +3272,22 @@ static void runSetup()
             }
 
             else if (bp == &bool_pr[GEOIP_BPR]) {
-                // show/hide lat/lng prompts, gpsd
+                // show/hide lat/lng/grid/gpsd prompts
                 if (bp->state) {
                     // no gpsd
                     eraseSPPromptValue (&string_pr[GPSDHOST_SPR]);
                     eraseBPPromptState (&bool_pr[GPSDFOLLOW_BPR]);
                     bool_pr[GPSDON_BPR].state = false;
                     drawBPState (&bool_pr[GPSDON_BPR]);
-                    // no lat/long
+                    // no lat/long/grid
                     eraseSPPromptValue (&string_pr[LAT_SPR]);
                     eraseSPPromptValue (&string_pr[LNG_SPR]);
+                    eraseSPPromptValue (&string_pr[GRID_SPR]);
                 } else {
-                    // show lat/long
+                    // show lat/long/grid
                     drawSPPromptValue (&string_pr[LAT_SPR]);
                     drawSPPromptValue (&string_pr[LNG_SPR]);
+                    drawSPPromptValue (&string_pr[GRID_SPR]);
                 }
             }
 
@@ -2737,6 +3301,19 @@ static void runSetup()
                     // show default 
                     eraseSPPromptValue (&string_pr[NTPHOST_SPR]);
                     drawBPState (&bool_pr[NTPSET_BPR]);
+                }
+            }
+
+            else if (bp == &bool_pr[ADIFSET_BPR]) {
+                // show/hide ADIF file name
+                if (bp->state) {
+                    // show file name
+                    eraseBPState (&bool_pr[ADIFSET_BPR]);
+                    drawSPPromptValue (&string_pr[ADIFFN_SPR]);
+                } else {
+                    // show no
+                    eraseSPPromptValue (&string_pr[ADIFFN_SPR]);
+                    drawBPState (&bool_pr[ADIFSET_BPR]);
                 }
             }
 
@@ -2806,11 +3383,12 @@ static void runSetup()
             }
 
             else if (bp == &bool_pr[GPSDON_BPR]) {
-                // show/hide gpsd host, geolocate, lat/long
+                // show/hide gpsd host, geolocate, lat/long/grid
                 if (bp->state) {
-                    // no lat/long
+                    // no lat/long/grid
                     eraseSPPromptValue (&string_pr[LAT_SPR]);
                     eraseSPPromptValue (&string_pr[LNG_SPR]);
+                    eraseSPPromptValue (&string_pr[GRID_SPR]);
                     // no geolocate
                     bool_pr[GEOIP_BPR].state = false;
                     drawBPState (&bool_pr[GEOIP_BPR]);
@@ -2822,40 +3400,37 @@ static void runSetup()
                     eraseSPPromptValue (&string_pr[GPSDHOST_SPR]);
                     eraseBPPromptState (&bool_pr[GPSDFOLLOW_BPR]);
                     drawBPState (&bool_pr[GPSDON_BPR]);
-                    // show lat/long
+                    // show lat/long/grid
                     drawSPPromptValue (&string_pr[LAT_SPR]);
                     drawSPPromptValue (&string_pr[LNG_SPR]);
+                    drawSPPromptValue (&string_pr[GRID_SPR]);
                 }
             }
 
-            else if (bp == &bool_pr[CLLBL_BPR]) {
-                // show cluster label type, or none
-                drawBoolPairState (CLLBL_BPR, CLLBLCALL_BPR);
-            }
-
-          #if defined(_SUPPORT_GPIO) && defined(_SUPPORT_ENVSENSOR)
             else if (bp == &bool_pr[GPIOOK_BPR]) {
-                // toggle KX3 and env sensors
                 if (bp->state) {
-                    // retain kx3 state but draw prompt
                     drawBPPrompt (&bool_pr[KX3ON_BPR]);
-                    drawBoolPairState(KX3ON_BPR, KX3BAUD_BPR);
-                    drawSPPromptValue (&string_pr[TEMPCORR_SPR]);
-                    drawSPPromptValue (&string_pr[PRESCORR_SPR]);
-                    drawSPPromptValue (&string_pr[TEMPCORR2_SPR]);
-                    drawSPPromptValue (&string_pr[PRESCORR2_SPR]);
+                    drawEntangledBools(&bool_pr[KX3ON_BPR], &bool_pr[KX3BAUD_BPR]);
                 } else {
-                    // turn off kx3 and erase it and temps
                     bool_pr[KX3ON_BPR].state = false;
                     eraseBPPromptState (&bool_pr[KX3ON_BPR]);
                     eraseBPPromptState (&bool_pr[KX3BAUD_BPR]);
-                    eraseSPPromptValue (&string_pr[TEMPCORR_SPR]);
-                    eraseSPPromptValue (&string_pr[PRESCORR_SPR]);
-                    eraseSPPromptValue (&string_pr[TEMPCORR2_SPR]);
-                    eraseSPPromptValue (&string_pr[PRESCORR2_SPR]);
                 }
+                drawBMEPrompts (bool_pr[GPIOOK_BPR].state || bool_pr[I2CON_BPR].state);
             }
-          #endif // _SUPPORT_GPIO
+
+            else if (bp == &bool_pr[I2CON_BPR]) {
+                if (bp->state) {
+                    // show file name
+                    eraseBPState (&bool_pr[I2CON_BPR]);
+                    drawSPPromptValue (&string_pr[I2CFN_SPR]);
+                } else {
+                    // show no
+                    eraseSPPromptValue (&string_pr[I2CFN_SPR]);
+                    drawBPState (&bool_pr[I2CON_BPR]);
+                }
+                drawBMEPrompts (bool_pr[GPIOOK_BPR].state || bool_pr[I2CON_BPR].state);
+            }
 
           #if defined(_WIFI_ASK)
             else if (bp == &bool_pr[WIFI_BPR]) {
@@ -2876,7 +3451,7 @@ static void runSetup()
             else if (bp == &bool_pr[KX3ON_BPR]) {
                 // show/hide baud rate but honor GPIOOK
                 if (bool_pr[GPIOOK_BPR].state) {
-                    drawBoolPairState(KX3ON_BPR, KX3BAUD_BPR);
+                    drawEntangledBools(&bool_pr[KX3ON_BPR], &bool_pr[KX3BAUD_BPR]);
                 } else if (bool_pr[KX3ON_BPR].state) {
                     // maintain off if no GPIO
                     bool_pr[KX3ON_BPR].state = false;
@@ -2895,7 +3470,7 @@ static void runSetup()
             }
         }
 
-    } while (!(inBox (s, done_b) || c == '\r' || c == '\n') || !validateStringPrompts());
+    } while (!(inBox (s, done_b) || c == '\r' || c == '\n') || !validateStringPrompts(true));
 
     drawDoneButton(true);
 
@@ -2903,74 +3478,93 @@ static void runSetup()
 
 }
 
-/* all done
+/* update the case of each component of the given grid square.
+ * N.B. we do NOT validate the grid
  */
-static void finishSettingUp()
+static char *scrubGrid (char *g)
+{
+    g[0] = toupper(g[0]);
+    g[1] = toupper(g[1]);
+    g[4] = tolower(g[4]);
+    g[5] = tolower(g[5]);
+
+    return (g);
+}
+
+/* save all parameters to NVRAM
+ */
+static void saveParams2NV()
 {
     // persist results 
 
 #if !defined(_SHOW_ALL) && !defined(_MARK_BOUNDS)
     // only persist creds when not testing
-    NVWriteString(NV_WIFI_SSID, wifissid);
-    NVWriteString(NV_WIFI_PASSWD, wifipw);
+    NVWriteString(NV_WIFI_SSID, wifi_ssid);
+    NVWriteString(NV_WIFI_PASSWD, wifi_pw);
 #endif
 
-    NVWriteString(NV_CALLSIGN, callsign);
+    NVWriteString(NV_CALLSIGN, call_sign);
     NVWriteUInt8 (NV_ROTATE_SCRN, bool_pr[FLIP_BPR].state);
     NVWriteUInt8 (NV_METRIC_ON, bool_pr[UNITS_BPR].state);
     NVWriteUInt8 (NV_WEEKMON, bool_pr[WEEKDAY1MON_BPR].state);
     NVWriteUInt8 (NV_BEAR_MAG, bool_pr[BEARING_BPR].state);
     NVWriteUInt32 (NV_KX3BAUD, bool_pr[KX3ON_BPR].state ? (bool_pr[KX3BAUD_BPR].state ? 38400 : 4800) : 0);
-    NVWriteFloat (NV_TEMPCORR, temp_corr[BME_76]);
-    NVWriteFloat (NV_PRESCORR, pres_corr[BME_76]);
-    NVWriteFloat (NV_TEMPCORR2, temp_corr[BME_77]);
-    NVWriteFloat (NV_PRESCORR2, pres_corr[BME_77]);
+    NVWriteFloat (NV_TEMPCORR76, temp_corr[BME_76]);
+    NVWriteFloat (NV_PRESCORR76, pres_corr[BME_76]);
+    NVWriteFloat (NV_TEMPCORR77, temp_corr[BME_77]);
+    NVWriteFloat (NV_PRESCORR77, pres_corr[BME_77]);
     NVWriteUInt8 (NV_BR_MIN, bright_min);
     NVWriteUInt8 (NV_BR_MAX, bright_max);
     NVWriteUInt8 (NV_USEGPSD, (bool_pr[GPSDON_BPR].state ? USEGPSD_FORTIME_BIT : 0)
                 | (bool_pr[GPSDON_BPR].state && bool_pr[GPSDFOLLOW_BPR].state ? USEGPSD_FORLOC_BIT : 0));
-    NVWriteString (NV_GPSDHOST, gpsdhost);
+    NVWriteString (NV_GPSDHOST, gpsd_host);
     NVWriteUInt8 (NV_USEDXCLUSTER, bool_pr[CLUSTER_BPR].state);
-    NVWriteUInt8 (NV_WSJT_SETSDX, bool_pr[SETDX_BPR].state);
     NVWriteUInt8 (NV_WSJT_DX, bool_pr[CLISWSJTX_BPR].state);
-    NVWriteString (NV_DXHOST, dxhost);
+    NVWriteString (NV_DXHOST, dx_host);
     NVWriteString (NV_DXCMD0, dxcl_cmds[0]);
     NVWriteString (NV_DXCMD1, dxcl_cmds[1]);
     NVWriteString (NV_DXCMD2, dxcl_cmds[2]);
     NVWriteString (NV_DXCMD3, dxcl_cmds[3]);
+    NVWriteString (NV_DXWLIST, dx_wlist);
 
-    uint8_t dx_use_mask = 0;
+    uint8_t dx_cmdmask = 0;
     if (bool_pr[DXCLCMD0_BPR].state)
-        dx_use_mask |= 1;
+        dx_cmdmask |= 1;
     if (bool_pr[DXCLCMD1_BPR].state)
-        dx_use_mask |= 2;
+        dx_cmdmask |= 2;
     if (bool_pr[DXCLCMD2_BPR].state)
-        dx_use_mask |= 4;
+        dx_cmdmask |= 4;
     if (bool_pr[DXCLCMD3_BPR].state)
-        dx_use_mask |= 8;
-    NVWriteUInt8 (NV_DXCMDUSED, dx_use_mask);
+        dx_cmdmask |= 8;
+    NVWriteUInt8 (NV_DXCMDUSED, dx_cmdmask);
 
-    NVWriteUInt16 (NV_DXPORT, dxport);
-    NVWriteString (NV_DXLOGIN, dxlogin);
+    NVWriteUInt16 (NV_DXPORT, dx_port);
+    NVWriteString (NV_DXLOGIN, dx_login);
     NVWriteUInt8 (NV_LOGUSAGE, bool_pr[LOGUSAGE_BPR].state);
     NVWriteUInt8 (NV_MAPSPOTS,
-            (bool_pr[CLLBL_BPR].state ? (bool_pr[CLLBLCALL_BPR].state ? NVMS_CALL : NVMS_PREFIX) : NVMS_NONE)
-            | (bool_pr[CLPATH_BPR].state ? NVMS_PATH : 0));
+              (bool_pr[SPOTLBL_BPR].state ? (bool_pr[SPOTLBLCALL_BPR].state ? NVMS_CALL : NVMS_DOT)
+                                          : (bool_pr[SPOTLBLCALL_BPR].state ? NVMS_PREFIX : NVMS_NONE))
+            | (bool_pr[SPOTPATH_BPR].state ? (bool_pr[SPOTPATHSZ_BPR].state ? NVMS_WIDE : NVMS_THIN) : 0));
     NVWriteUInt8 (NV_NTPSET, bool_pr[NTPSET_BPR].state);
-    NVWriteString(NV_NTPHOST, ntphost);
+    NVWriteString (NV_NTPHOST, ntp_host);
+    NVWriteString (NV_ADIFFN, adif_fn);
+    NVWriteUInt8 (NV_I2CON, bool_pr[I2CON_BPR].state);
+    NVWriteString (NV_I2CFN, i2c_fn);
     NVWriteUInt8 (NV_DATEMDY, bool_pr[DATEFMT_MDY_BPR].state);
     NVWriteUInt8 (NV_DATEDMYYMD, bool_pr[DATEFMT_DMYYMD_BPR].state);
     NVWriteUInt8 (NV_GPIOOK, bool_pr[GPIOOK_BPR].state);
     NVWriteInt16 (NV_CENTERLNG, center_lng);
     NVWriteUInt8 (NV_RIGUSE, bool_pr[RIGUSE_BPR].state);
-    NVWriteString (NV_RIGHOST, righost);
-    NVWriteUInt16 (NV_RIGPORT, rigport);
+    NVWriteString (NV_RIGHOST, rig_host);
+    NVWriteUInt16 (NV_RIGPORT, rig_port);
     NVWriteUInt8 (NV_ROTUSE, bool_pr[ROTUSE_BPR].state);
-    NVWriteString (NV_ROTHOST, rothost);
-    NVWriteUInt16 (NV_ROTPORT, rotport);
+    NVWriteString (NV_ROTHOST, rot_host);
+    NVWriteUInt16 (NV_ROTPORT, rot_port);
     NVWriteUInt8 (NV_FLRIGUSE, bool_pr[FLRIGUSE_BPR].state);
-    NVWriteString (NV_FLRIGHOST, flrighost);
-    NVWriteUInt16 (NV_FLRIGPORT, flrigport);
+    NVWriteString (NV_FLRIGHOST, flrig_host);
+    NVWriteUInt16 (NV_FLRIGPORT, flrig_port);
+    NVWriteUInt8 (NV_SCROLLDIR, bool_pr[SCROLLDIR_BPR].state);
+    NVWriteUInt8 (NV_SCROLLLEN, nMoreScrollRows());
 
     // save and engage user's X11 settings
     uint16_t x11flags = 0;
@@ -2986,34 +3580,22 @@ static void finishSettingUp()
         NVWriteUInt16 (p.nv, c);
     }
 
-    // save which colors are dashed -- N.B. just satpath for now
-    NVWriteUInt32 (NV_DASHED, csel_satpath_state ? (1 << SATPATH_CSPR) : 0);
+    // save which colors are dashed
+    uint32_t dashed = 0;
+    for (int i = 0; i < N_CSPR; i++)
+        if (csel_pr[i].a_state)
+            dashed |= (1 << i);
+    NVWriteUInt32 (NV_DASHED, dashed);
 
-    // set DE tz and grid only if ll was edited and op is not using some other method to set location
+    // save DE tz and grid only if ll was edited and op is not using some other method to set location
     if (!bool_pr[GEOIP_BPR].state && !bool_pr[GPSDON_BPR].state && ll_edited) {
         normalizeLL (de_ll);
         NVWriteFloat(NV_DE_LAT, de_ll.lat_d);
         NVWriteFloat(NV_DE_LNG, de_ll.lng_d);
-        setNVMaidenhead(NV_DE_GRID, de_ll);
+        NVWriteString(NV_DE_GRID, scrubGrid(string_pr[GRID_SPR].v_str));
         de_tz.tz_secs = getTZ (de_ll);
         NVWriteInt32(NV_DE_TZ, de_tz.tz_secs);
     }
-
-    // clean up shadow strings
-    free (string_pr[LAT_SPR].v_str);
-    free (string_pr[LNG_SPR].v_str);
-    free (string_pr[DXPORT_SPR].v_str);
-    free (string_pr[RIGPORT_SPR].v_str);
-    free (string_pr[ROTPORT_SPR].v_str);
-    free (string_pr[FLRIGPORT_SPR].v_str);
-    free (string_pr[TEMPCORR_SPR].v_str);
-    free (string_pr[PRESCORR_SPR].v_str);
-    free (string_pr[TEMPCORR2_SPR].v_str);
-    free (string_pr[PRESCORR2_SPR].v_str);
-    free (string_pr[BRMIN_SPR].v_str);
-    free (string_pr[BRMAX_SPR].v_str);
-    free (string_pr[CENTERLNG_SPR].v_str);
-
 }
 
 /* draw the given string with border centered inside the given box using the current font.
@@ -3047,33 +3629,45 @@ void clockSetup()
     // load values from nvram, else set defaults
     initSetup();
 
-    // ask user whether they want to run setup
-    if (!askRun())
-        return;
+    // prep shadowed params, if nothing else for logging them
+    initShadowedParams();
 
-    // ok, user wants to run setup
+    // ask user whether they want to run setup, display anyway if any strings are invalid
+    bool str_ok = validateStringPrompts (false);
+    if ((!str_ok || askRun()) && askPasswd (_FX("setup"), false)) {
 
-    // init display prompts and options
-    initDisplay();
+        // init display prompts and options
+        initDisplay();
 
-    // get current rotation state so we can tell whether it changes
-    bool rotated = rotateScreen();
+        // start by indicating any errors
+        if (!str_ok)
+            validateStringPrompts (true);
 
-    // main interaction loop
-    runSetup();
+        // get current rotation state so we can tell whether it changes
+        bool rotated = rotateScreen();
 
-    // finish up
-    finishSettingUp();
+        // main interaction loop
+        runSetup();
 
-    // must recalibrate if rotating screen
-    if (rotated != rotateScreen()) {
-        tft.setRotation(rotateScreen() ? 2 : 0);
-        calibrateTouch(true);
+        // save
+        saveParams2NV();
+
+        // must recalibrate if rotating screen
+        if (rotated != rotateScreen()) {
+            tft.setRotation(rotateScreen() ? 2 : 0);
+            calibrateTouch(true);
+        }
     }
 
+    // log and clean up shadowed params
+    logAllPrompts();
+    freeShadowedParams();
+
+    // ok to send liveweb full screen setting
+    liveweb_fs_ready = true;
 }
 
-/* return whether the given string is a valid latitude specification, set lat if so
+/* return whether the given string is a valid latitude specification, if so set lat in degrees
  */
 bool latSpecIsValid (const char *lat_spec, float &lat)
 {
@@ -3092,7 +3686,7 @@ bool latSpecIsValid (const char *lat_spec, float &lat)
     return (true);
 }
 
-/* return whether the given string is a valid longitude specification, set lng if so.
+/* return whether the given string is a valid longitude specification, if so set lng in degrees
  * N.B. we allow 180 east in spec but return lng as 180 west.
  */
 bool lngSpecIsValid (const char *lng_spec, float &lng)
@@ -3133,7 +3727,7 @@ const char *getWiFiSSID()
     // don't try to set linux wifi while testing
     #ifndef _SHOW_ALL
         if (bool_pr[WIFI_BPR].state)
-            return (wifissid);
+            return (wifi_ssid);
         else
     #endif // !_SHOW_ALL
             return (NULL);
@@ -3147,7 +3741,7 @@ const char *getWiFiPW()
     // don't try to set linux wifi while testing
     #ifndef _SHOW_ALL
         if (bool_pr[WIFI_BPR].state)
-            return (wifipw);
+            return (wifi_pw);
         else
     #endif // !_SHOW_ALL
             return (NULL);
@@ -3158,7 +3752,23 @@ const char *getWiFiPW()
  */
 const char *getCallsign()
 {
-    return (callsign);
+    return (call_sign);
+}
+
+/* set a new default/persistent DE call sign.
+ * also sets dx_login to match.
+ * intended for use by set_newde API
+ */
+bool setCallsign (const char *cs)
+{
+    int csl = strlen (cs);
+    if (cs[0] == '\0' || cs[0] == ' ' || csl >= NV_CALLSIGN_LEN || csl >= NV_DXLOGIN_LEN)
+        return (false);
+    strncpy (call_sign, cs, NV_CALLSIGN_LEN-1);
+    strncpy (dx_login, cs, NV_DXLOGIN_LEN-1);
+    NVWriteString (NV_CALLSIGN, call_sign);
+    NVWriteString (NV_DXLOGIN, dx_login);
+    return (true);
 }
 
 /* return pointer to static storage containing the DX cluster host
@@ -3166,7 +3776,7 @@ const char *getCallsign()
  */
 const char *getDXClusterHost()
 {
-    return (dxhost);
+    return (dx_host);
 }
 
 /* return pointer to static storage containing the GPSD host
@@ -3174,7 +3784,7 @@ const char *getDXClusterHost()
  */
 const char *getGPSDHost()
 {
-    return (gpsdhost);
+    return (gpsd_host);
 }
 
 /* return pointer to static storage containing the NTP host defined herein
@@ -3182,7 +3792,7 @@ const char *getGPSDHost()
  */
 const char *getLocalNTPHost()
 {
-    return (ntphost);
+    return (ntp_host);
 }
 
 /* return dx cluster node port
@@ -3190,7 +3800,7 @@ const char *getLocalNTPHost()
  */
 int getDXClusterPort()
 {
-    return (dxport);
+    return (dx_port);
 }
 
 /* return whether we should be allowing DX cluster
@@ -3228,30 +3838,42 @@ bool useMagBearing()
     return (bool_pr[BEARING_BPR].state);
 }
 
-/* return whether to draw dx paths
+/* return Raw size of spot paths, including zero if not wanted
  */
-bool getDXSpotPaths()
+int getSpotPathSize()
 {
-#if defined(_SUPPORT_CLPATH)
-    return (bool_pr[CLPATH_BPR].state);
+#if defined(_SUPPORT_SPOTPATH)
+    if (bool_pr[SPOTPATH_BPR].state)
+        return (bool_pr[SPOTPATHSZ_BPR].state ? WIDEPATHSZ : THINPATHSZ);
+    else
+        return (0);
 #else
-    return (false);
+    return (0);
 #endif
 }
 
-/* return whether to label dx spots
+/* return whether to label spots with either call or prefix.
+ *   call plotSpotCallsigns() to determine which.
+ *   this does NOT include DOT, call dotSpots() to determine that.
  */
-bool labelDXClusterSpots()
+bool labelSpots()
 {
-    return (bool_pr[CLLBL_BPR].state);
+    return (bool_pr[SPOTLBLCALL_BPR].state);
 }
 
-/* return whether to label dx spots as whole callsigns, else just prefix.
- * N.B. only sensible if labelDXClusterSpots() is true
+/* return whether to label spots with dots.
+ */
+bool dotSpots()
+{
+    return (bool_pr[SPOTLBL_BPR].state && !bool_pr[SPOTLBLCALL_BPR].state);
+}
+
+/* return whether to label spots as whole callsigns, else just prefix.
+ * N.B. only sensible if labelSpots() is true
  */
 bool plotSpotCallsigns()
 {
-    return (bool_pr[CLLBLCALL_BPR].state);
+    return (bool_pr[SPOTLBL_BPR].state);
 }
 
 /* return whether to use IP geolocation
@@ -3280,6 +3902,18 @@ bool useGPSDLoc()
 bool useLocalNTPHost()
 {
     return (bool_pr[NTPSET_BPR].state);
+}
+
+/* return whether to use OS for time, not NTP
+ */
+bool useOSTime()
+{
+#if defined(_IS_ESP8266)
+    // there is no OS
+    return (false);
+#else
+    return (bool_pr[NTPSET_BPR].state && strcmp (ntp_host, "OS") == 0);
+#endif
 }
 
 /* return desired date format
@@ -3322,7 +3956,7 @@ bool setBMETempCorr(BMEIndex i, float delta)
     temp_corr[(int)i] = delta;
 
     // persist
-    NVWriteFloat (i == BME_76 ? NV_TEMPCORR : NV_TEMPCORR2, temp_corr[i]);
+    NVWriteFloat (i == BME_76 ? NV_TEMPCORR76 : NV_TEMPCORR77, temp_corr[i]);
 
     return (true);
 }
@@ -3349,7 +3983,7 @@ bool setBMEPresCorr(BMEIndex i, float delta)
     pres_corr[(int)i] = delta;
 
     // persist
-    NVWriteFloat (i == BME_76 ? NV_PRESCORR : NV_PRESCORR2, pres_corr[i]);
+    NVWriteFloat (i == BME_76 ? NV_PRESCORR76 : NV_PRESCORR77, pres_corr[i]);
 
     return (true);
 }
@@ -3376,14 +4010,14 @@ uint32_t getKX3Baud()
  */
 uint8_t getBrMax()
 {
-    return (bright_max);
+    return (brDimmableOk() ? bright_max : 100);
 }
 
 /* return desired minimum brightness, percentage
  */
 uint8_t getBrMin()
 {
-    return (bright_min);
+    return (brDimmableOk() ? bright_min : 0);
 }
 
 /* whether to engage full screen.
@@ -3432,9 +4066,9 @@ bool getRigctld (char host[NV_RIGHOST_LEN], int *portp)
 {
     if (bool_pr[RIGUSE_BPR].state) {
         if (host != NULL)
-            strcpy (host, righost);
+            strcpy (host, rig_host);
         if (portp != NULL)
-            *portp = rigport;
+            *portp = rig_port;
         return (true);
     }
     return (false);
@@ -3447,9 +4081,9 @@ bool getRotctld (char host[NV_ROTHOST_LEN], int *portp)
 {
     if (bool_pr[ROTUSE_BPR].state) {
         if (host != NULL)
-            strcpy (host, rothost);
+            strcpy (host, rot_host);
         if (portp != NULL)
-            *portp = rotport;
+            *portp = rot_port;
         return (true);
     }
     return (false);
@@ -3462,9 +4096,9 @@ bool getFlrig (char host[NV_FLRIGHOST_LEN], int *portp)
 {
     if (bool_pr[FLRIGUSE_BPR].state) {
         if (host != NULL)
-            strcpy (host, flrighost);
+            strcpy (host, flrig_host);
         if (portp != NULL)
-            *portp = flrigport;
+            *portp = flrig_port;
         return (true);
     }
     return (false);
@@ -3474,7 +4108,7 @@ bool getFlrig (char host[NV_FLRIGHOST_LEN], int *portp)
  */
 const char *getDXClusterLogin()
 {
-    return (dxlogin[0] != '\0' ? dxlogin : callsign);
+    return (dx_login[0] != '\0' ? dx_login : call_sign);
 }
 
 /* return cluster commands and whether each is on or off.
@@ -3501,19 +4135,19 @@ bool setDXCluster (char *host, const char *port_str, char ynot[])
         strcpy (ynot, _FX("Bad host"));
         return (false);
     }
-    if (!portOK (port_str, 1000, &dxport)) {
+    if (!portOK (port_str, 1000, &dx_port)) {
         strcpy (ynot, _FX("Bad port"));
         return (false);
     }
-    strncpy (dxhost, host, NV_DXHOST_LEN-1);
-    NVWriteString (NV_DXHOST, dxhost);
-    NVWriteUInt16 (NV_DXPORT, dxport);
+    strncpy (dx_host, host, NV_DXHOST_LEN-1);
+    NVWriteString (NV_DXHOST, dx_host);
+    NVWriteUInt16 (NV_DXPORT, dx_port);
     return(true);
 }
 
-/* return color for the given CSid
+/* return current rgb565 color for the given ColorSelection
  */
-uint16_t getMapColor (CSIds id)
+uint16_t getMapColor (ColorSelection id)
 {
     uint16_t c;
     if (id >= 0 && id < N_CSPR) {
@@ -3524,9 +4158,9 @@ uint16_t getMapColor (CSIds id)
     return (c);
 }
 
-/* return name of the given CSid
+/* return name of the given color
  */
-const char* getMapColorName (CSIds id)
+const char* getMapColorName (ColorSelection id)
 {
     const char *n;
     if (id >= 0 && id < N_CSPR)
@@ -3560,18 +4194,11 @@ bool setMapColor (const char *name, uint16_t rgb565)
     return (false);
 }
 
-/* return whether satpath should be dashed
+/* return whether the given color line should be dashed
  */
-bool getSatPathDashed()
+bool getColorDashed (ColorSelection id)
 {
-    return (csel_satpath_state);
-}
-
-/* return whether receiving a WSTX spot also sets DX
- */
-bool setWSJTDX(void)
-{
-    return (bool_pr[SETDX_BPR].state);
+    return (csel_pr[id].a_state);
 }
 
 /* return whether dx host is actually WSJT-X, else 
@@ -3579,4 +4206,57 @@ bool setWSJTDX(void)
 bool useWSJTX(void)
 {
     return (bool_pr[CLISWSJTX_BPR].state);
+}
+
+/* return name of ADIF, else NULL if not set
+ */
+const char *getADIFilename(void)
+{
+    return (bool_pr[ADIFSET_BPR].state ? adif_fn : NULL);
+}
+
+/* return name of I2C device to use, else NULL
+ */
+const char *getI2CFilename(void)
+{
+    // N.B. do not call I2CFnOk here, just rely on it having been used by setup to determine I2CON_BPR
+    return (bool_pr[I2CON_BPR].state ? i2c_fn : NULL);
+}
+
+/* return whether the given call is on the dx cluster watch list
+ */
+bool onDXWatchList (const char *call)
+{
+    // dx_wlist is a list of calls or prefixes separated by spaces or commas.
+    // call is considered to be in the list if its first chars match any of the calls or prefixes.
+
+    // copy for strtok
+    StackMalloc watched(sizeof(dx_wlist));
+    char *wl = (char *) watched.getMem();
+    strcpy (wl, dx_wlist);
+
+    // separators
+    const char *sep = ", ";
+    
+    // scan for match
+    for (char *prefix = strtok (wl, sep); prefix; prefix = strtok (NULL, sep))
+        if (strncasecmp (call, prefix, strlen(prefix)) == 0)
+            return (true);
+
+    // no match
+    return (false);
+}
+
+/* return whether scolling panes should show the newest entry on top, else newest on bottom
+ */
+bool scrollTopToBottom(void)
+{
+    return (bool_pr[SCROLLDIR_BPR].state);
+}
+
+/* return number of ADDITIONAL scroll rows
+ */
+int nMoreScrollRows(void)
+{
+    return (atoi (getEntangledValue (&bool_pr[SCROLLLEN_BPR], &bool_pr[SCROLLBIG_BPR])));
 }

@@ -5,7 +5,7 @@
  *   more info: https://gpsd.gitlab.io/gpsd/gpsd_json.html
  *
  * Simple server test, run this command:
- *   while true; do echo '"class":"TPV","mode":2,"lat":34.567,"lon":-123.456,"time":"2020-01-02T03:04:05.000Z"' | nc -l 192.168.7.11 2947; done
+ *   while true; do echo '"class":"TPV","mode":2,"lat":34.567,"lon":-123.456,"time":"2020-01-02T03:04:05.000Z"'; done | nc -k -l 192.168.7.11 2947
  */
 
 #include "HamClock.h"
@@ -34,32 +34,35 @@ static bool lookforTime (const char *buf, void *arg)
             if (strncmp (classstr+9, "TPV", 3) == 0)
                 found_tpv = true;
         }
-        if (!found_tpv)
+        if (!found_tpv) {
+            Serial.print (_FX("GPSD: no TPV\n"));
             return (false);
+        }
 
         const char *modestr = strstr (classstr, "\"mode\":");
-        if (!modestr || atoi(modestr+7) < 2)
+        if (!modestr) {
+            Serial.print (_FX("GPSD: no mode\n"));
             return (false);
+        }
+        int mode = atoi(modestr+7);
+        if (mode < 2) {
+            Serial.printf (_FX("GPSD: bad mode '%s' %d\n"), modestr+7, mode);
+            return (false);
+        }
 
         const char *timestr = strstr (classstr, "\"time\":\"");
-        if (!timestr || strlen(timestr) < 8+19)
+        if (!timestr || strlen(timestr) < 8+19) {
+            Serial.print (_FX("GPSD: no time\n"));
             return(false);
+        }
 
         // crack time form: "time":"2012-04-05T15:00:01.501Z"
-        int yr, mo, dy, hr, mn, sc;
-        if (sscanf (timestr+8, _FX("%d-%d-%dT%d:%d:%d"), &yr, &mo, &dy, &hr, &mn, &sc) != 6)
+        const char *iso = timestr+8;
+        time_t gpsd_time = crackISO8601 (iso);
+        if (gpsd_time == 0) {
+            Serial.printf (_FX("GPSD: unexpected ISO8601: %.24s\n"), iso);
             return (false);
-        Serial.printf (_FX("GPSD: %04d-%02d-%02dT%02d:%02d:%02d\n"), yr, mo, dy, hr, mn, sc);
-
-        // reformat to UNIX time
-        tmElements_t tm;
-        tm.Year = yr - 1970;
-        tm.Month = mo;
-        tm.Day = dy;
-        tm.Hour = hr;
-        tm.Minute = mn;
-        tm.Second = sc;
-        time_t gpsd_time = makeTime (tm);
+        }
 
         // correct for time spent here
         gpsd_time += (millis() - t0 + 500)/1000;
@@ -128,7 +131,7 @@ static bool getGPSDSomething(bool (*lookf)(const char *buf, void *arg), void *ar
         bool look_ok = false;
         bool connect_ok = false;
         bool got_something = false;
-        #define MAXGLL 2000                 // max line length
+        #define MAXGLL 1000                 // max line length
         StackMalloc line_mem(MAXGLL);
         char *line = (char *) line_mem.getMem();
 
@@ -147,14 +150,23 @@ static bool getGPSDSomething(bool (*lookf)(const char *buf, void *arg), void *ar
 
             // read lines, give to lookf, done when it's happy or no more or time out
             for (size_t ll = 0;
-                        !timesUp(&t0,GPSD_TO) && ll < MAXGLL && !look_ok && getChar(gpsd_client,&line[ll]);
+                        !timesUp(&t0,GPSD_TO) && ll < MAXGLL && !look_ok && getTCPChar(gpsd_client,&line[ll]);
                         /* none */ ) {
 
-                if (line[ll] == '\n') {
+                // hopeful?
+                got_something = true;
+
+                // add to line, crack when full or see nl
+                if (ll == MAXGLL-1 || line[ll] == '\n') {
+                    char line_covered = line[ll];
                     line[ll] = '\0';
-                    got_something = true;
                     look_ok = (*lookf)(line, arg);
-                    ll = 0;
+                    if (!look_ok) {
+                        // retain tail of previous in case keyword got split
+                        line[ll] = line_covered;
+                        ll = 100;
+                        memmove (line, line+(MAXGLL-ll), ll);
+                    }
                 } else
                     ll++;
             }
@@ -226,4 +238,25 @@ void updateGPSDLoc()
         #define _MIN_STEP 1                             // miles
         if (dist2 > _MIN_STEP*_MIN_STEP)
             newDE (ll, NULL);
+}
+
+/* convert YYYY-MM-DDTHH:MM:SS to unix time, or 0 if fails
+ */
+time_t crackISO8601 (const char *iso)
+{
+        time_t t = 0;
+        int yr, mo, dy, hr, mn, sc;
+        if (sscanf (iso, _FX("%d-%d-%dT%d:%d:%d"), &yr, &mo, &dy, &hr, &mn, &sc) == 6) {
+
+            // reformat
+            tmElements_t tm;
+            tm.Year = yr - 1970;
+            tm.Month = mo;
+            tm.Day = dy;
+            tm.Hour = hr;
+            tm.Minute = mn;
+            tm.Second = sc;
+            t = makeTime(tm);
+        }
+        return (t);
 }

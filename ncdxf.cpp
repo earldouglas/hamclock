@@ -15,7 +15,6 @@
 #define BEACONR         9                       // beacon symbol radius, pixels
 #define BLEG            (BEACONR-4)             // beacon symbol leg length
 #define BEACONCW        6                       // beacon char width
-#define BORDER_COL      RGB565(127,127,127)     // control box border color
 
 typedef struct {
     int16_t lat, lng;                           // location, degs north and east
@@ -59,20 +58,11 @@ static NCDXFBeacon blist[NBEACONS] = {
 
 /* symbol color for each frequency
  */
-#if defined(_SUPPORT_PSKESP)
-// no getMapColor for band colors
-#define BCOL_14 RA8875_RED              // 14.100 MHz
-#define BCOL_18 RA8875_GREEN            // 18.110 MHz
-#define BCOL_21 RGB565(100,100,255)     // 21.150 MHz
-#define BCOL_24 RA8875_YELLOW           // 24.930 MHz
-#define BCOL_28 RGB565(255,125,0)       // 28.200 MHz
-#else
 #define BCOL_14 getMapColor(BAND20_CSPR)
 #define BCOL_18 getMapColor(BAND17_CSPR)
 #define BCOL_21 getMapColor(BAND15_CSPR)
 #define BCOL_24 getMapColor(BAND12_CSPR)
 #define BCOL_28 getMapColor(BAND10_CSPR)
-#endif
 #define BCOL_S  RA8875_BLACK            // silent, not actually drawn
 #define BCOL_N  6                       // number of color states
 
@@ -119,13 +109,14 @@ static void drawBeacon (NCDXFBeacon &nb)
 }
 
 /* erase beacon
- * only needed on ESP
+ * ESP only
  */
 static void eraseBeacon (NCDXFBeacon &nb)
 {
-    resetWatchdog();
 
 #if defined (_IS_ESP8266)
+
+    resetWatchdog();
 
     // redraw map under symbol
     for (int8_t dy = -BEACONR; dy <= BEACONR/2; dy += 1) {
@@ -140,11 +131,15 @@ static void eraseBeacon (NCDXFBeacon &nb)
             drawMapCoord (x, y);
     }
 
-#endif
+#endif // _IS_ESP8266
+
 }
+
+#if defined (_IS_ESP8266)
 
 
 /* return whether the given point is anywhere inside a beacon symbol or call
+ * ESP only
  */
 static bool overBeacon (const SCoord &s, const NCDXFBeacon &nb)
 {
@@ -170,10 +165,31 @@ static bool overBeacon (const SCoord &s, const NCDXFBeacon &nb)
     return (true);
 }
 
-
-/* update beacon display, typically on each 10 second period unless immediate.
+/* return whether the given screen coord is over any visible map symbol or call sign box
+ * ESP only
  */
-void updateBeacons (bool immediate)
+bool overAnyBeacon (const SCoord &s)
+{
+    if (!(brb_rotset & (1 << BRB_SHOW_BEACONS)))
+        return (false);
+
+    for (NCDXFBeacon *bp = blist; bp < &blist[NBEACONS]; bp++) {
+        if (bp->c == BCOL_S)
+            continue;
+        if (overBeacon (s, *bp))
+            return (true);
+    }
+
+    return (false);
+}
+
+#endif // _IS_ESP8266
+
+
+/* update map beacons, typically on each 10 second period unless immediate.
+ * if erase_too then erase all beacons even if known to be off.
+ */
+void updateBeacons (bool immediate, bool erase_too)
 {
     // counts as on as long as in rotation set, need not be in front now
     bool beacons_on = brb_rotset & (1 << BRB_SHOW_BEACONS);
@@ -192,8 +208,10 @@ void updateBeacons (bool immediate)
     setBeaconStates();
     for (NCDXFBeacon *bp = blist; bp < &blist[NBEACONS]; bp++) {
         if (bp->c == BCOL_S || !beacons_on) {
-            eraseBeacon (*bp);
-            erased_any = true;
+            if (erase_too) {
+                eraseBeacon (*bp);
+                erased_any = true;
+            }
         } else if (overMap(bp->s) && !overRSS (bp->call_b)) {
             drawBeacon (*bp);
         }
@@ -215,23 +233,6 @@ void updateBeaconScreenLocations()
         ll2s (deg2rad(bp->lat), deg2rad(bp->lng), bp->s, 3*BEACONCW);   // about max
         setMapTagBox (bp->call, bp->s, BEACONR/2+1, bp->call_b);
     }
-}
-
-/* return whether the given screen coord is over any visible map symbol or call sign box
- */
-bool overAnyBeacon (const SCoord &s)
-{
-    if (!(brb_rotset & (1 << BRB_SHOW_BEACONS)))
-        return (false);
-
-    for (NCDXFBeacon *bp = blist; bp < &blist[NBEACONS]; bp++) {
-        if (bp->c == BCOL_S)
-            continue;
-        if (overBeacon (s, *bp))
-            return (true);
-    }
-
-    return (false);
 }
 
 /* draw the beacon key in NCDXF_b.
@@ -290,9 +291,12 @@ void drawBeaconKey()
 }
 
 /* draw any of the various contents in NCDXF_b depending on brb_mode.
+ * most just draw but return success for options that require fresh lookups.
  */
-void drawNCDXFBox()
+bool drawNCDXFBox()
 {
+    bool ok = true;
+
     // erase
     fillSBox (NCDXF_b, RA8875_BLACK);
 
@@ -306,7 +310,8 @@ void drawNCDXFBox()
 
     case BRB_SHOW_SWSTATS:
 
-        drawSpaceStats();
+        (void) checkSpaceStats();
+        drawSpaceStats(RA8875_BLACK);
         break;
 
     case BRB_SHOW_BME76:        // fallthru
@@ -322,6 +327,11 @@ void drawNCDXFBox()
         drawBrightness();
         break;
 
+    case BRB_SHOW_DEWX: // fallthru
+    case BRB_SHOW_DXWX:
+        ok = drawNCDXFWx ((BRB_MODE)brb_mode);
+        break;
+
     case BRB_N:
         
         // lint
@@ -332,36 +342,44 @@ void drawNCDXFBox()
     tft.drawLine (NCDXF_b.x, NCDXF_b.y, NCDXF_b.x+NCDXF_b.w-1, NCDXF_b.y, GRAY);
     tft.drawLine (NCDXF_b.x, NCDXF_b.y, NCDXF_b.x, NCDXF_b.y+NCDXF_b.h-1, GRAY);
     tft.drawLine (NCDXF_b.x+NCDXF_b.w-1, NCDXF_b.y, NCDXF_b.x+NCDXF_b.w-1, NCDXF_b.y+NCDXF_b.h-1, GRAY);
+
+    // ack
+    return (ok);
 }
 
-/* common template to draw space weather or BME stats in NCDXF_b.
+/* common template to draw table of stats in NCDXF_b.
+ * use white text and colors for each unless color is black in which case us it for everything.
  */
-void drawNCDXFStats (const char titles[NCDXF_B_NFIELDS][NCDXF_B_MAXLEN],
-                   const char values[NCDXF_B_NFIELDS][NCDXF_B_MAXLEN],
-                   const uint16_t colors[NCDXF_B_NFIELDS])
+void drawNCDXFStats (uint16_t color,
+                     const char titles[NCDXF_B_NFIELDS][NCDXF_B_MAXLEN],
+                     const char values[NCDXF_B_NFIELDS][NCDXF_B_MAXLEN],
+                     const uint16_t colors[NCDXF_B_NFIELDS])
 {
     // prep layout
-    uint16_t y = NCDXF_b.y + 2;
-    const int rect_dy = -23;
-    const int rect_h = 26;
+    uint16_t y = NCDXF_b.y;
+    const int valurect_dy = -23;
+    const int valurect_h = 26;
 
     // show each item
     for (int i = 0; i < NCDXF_B_NFIELDS; i++) {
 
-        selectFontStyle (LIGHT_FONT, FAST_FONT);
-        tft.setTextColor (RA8875_WHITE);
-        tft.setCursor (NCDXF_b.x + (NCDXF_b.w-getTextWidth(titles[i]))/2, y);
-        tft.print (titles[i]);
-
-        y += 31;
+        y += 25;
 
         selectFontStyle (LIGHT_FONT, SMALL_FONT);
-        tft.setTextColor (colors[i]);
-        tft.fillRect (NCDXF_b.x+1, y+rect_dy, NCDXF_b.w-2, rect_h, RA8875_BLACK);
+        tft.setTextColor (color == RA8875_BLACK ? colors[i] : color);
+        tft.fillRect (NCDXF_b.x+1, y+valurect_dy, NCDXF_b.w-2, valurect_h, RA8875_BLACK);
+        // tft.drawRect (NCDXF_b.x+1, y+valurect_dy, NCDXF_b.w-2, valurect_h, RA8875_RED);
         tft.setCursor (NCDXF_b.x + (NCDXF_b.w-getTextWidth(values[i]))/2, y);
         tft.print (values[i]);
 
-        y += 5;
+        y += 4;
+
+        selectFontStyle (LIGHT_FONT, FAST_FONT);
+        tft.setTextColor (color == RA8875_BLACK ? RA8875_WHITE : color);
+        tft.setCursor (NCDXF_b.x + (NCDXF_b.w-getTextWidth(titles[i]))/2, y);
+        tft.print (titles[i]);
+
+        y += 7;
     }
 }
 
@@ -419,12 +437,26 @@ void doNCDXFStatsTouch (const SCoord &s, PlotChoice pcs[NCDXF_B_NFIELDS])
  */
 void initBRBRotset()
 {
-    if (!NVReadUInt8 (NV_BRB_ROTSET, &brb_rotset) || brb_rotset == 0) {
+    if (!NVReadUInt16 (NV_BRB_ROTSET, &brb_rotset)) {
+        // check for old style
+        uint8_t old_rotset;
+        if (NVReadUInt8 (NV_BRB_ROTSET_OLD, &old_rotset))
+            brb_rotset = old_rotset;
+        else
+            brb_rotset = 0;
+    }
+    checkBRBRotset();
+}
+
+/* insure brb_rotset and brb_mode are set sensibly
+ */
+void checkBRBRotset()
+{
+    if (!brb_rotset) {
         brb_mode = BRB_SHOW_BEACONS;            // just pick one that is always possible
-        brb_rotset = 1 << brb_mode;    
-        NVWriteUInt8 (NV_BRB_ROTSET, brb_rotset);
+        brb_rotset = 1 << BRB_SHOW_BEACONS;    
     } else {
-        // arbitrarily set brb_mode to first bit, will be double-checked later
+        // arbitrarily set brb_mode to first set bit
         for (int i = 0; i < BRB_N; i++) {
             if (brb_rotset & (1 << i)) {
                 brb_mode = i;
@@ -432,4 +464,6 @@ void initBRBRotset()
             }
         }
     }
+    NVWriteUInt16 (NV_BRB_ROTSET, brb_rotset);
+    logBRBRotSet();
 }

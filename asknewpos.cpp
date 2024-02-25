@@ -16,7 +16,6 @@
 #include "HamClock.h"
 
 // basic arrangement
-#define NPKB_ROWS       4               // actual keyboard rows
 #define NPKB_COLS       9               // actual keyboard cols
 #define NP_NBOXR        8               // total number of rows in box
 #define NP_FONTW        6               // fixed-width font width
@@ -52,7 +51,6 @@ typedef struct {
     uint8_t r;                  // row 0 .. NP_NBOXR-1
     char str[NPF_MAXLEN+1];     // user contents, including EOS
 } NPField;
-static const char ll_fmt[] = "%.6g%c";  // lat/long + dir format suitable within NPF_MAXLEN
 
 // field names
 typedef enum {
@@ -84,10 +82,8 @@ static int keyboardMap (int row, int col)
  */
 static void setNPLL (NPField f[NPF_N], const LatLong &ll)
 {
-    snprintf (f[NPF_LAT].str, sizeof(f[NPF_LAT].str), ll_fmt,
-                                            fabsf(ll.lat_d), ll.lat_d < 0 ? 'S' : 'N');
-    snprintf (f[NPF_LNG].str, sizeof(f[NPF_LNG].str), ll_fmt,
-                                            fabsf(ll.lng_d), ll.lng_d < 0 ? 'W' : 'E');
+    formatLat (ll.lat_d, f[NPF_LAT].str, sizeof(f[NPF_LAT].str));
+    formatLng (ll.lng_d, f[NPF_LNG].str, sizeof(f[NPF_LNG].str));
 }
 
 
@@ -146,7 +142,7 @@ static void eraseNPChar (const SBox &b, NPField &f)
         eraseNPFocus (b, f);
         f.str[--l] = '\0';
         uint16_t x = f.x + getTextWidth(f.str);
-        tft.fillRect (x, ROW2FY(b,f.r), NP_FONTW, NP_FONTH, RA8875_BLACK);
+        tft.fillRect (x, ROW2FY(b,f.r)-1, NP_FONTW, NP_FONTH+2, RA8875_BLACK);
         drawNPFocus (b, f);
     }
 }
@@ -441,6 +437,17 @@ bool askNewPos (const SBox &b, LatLong &op_ll, char op_grid[MAID_CHARLEN])
     char new_grid[MAID_CHARLEN];
     memset (&new_ll, 0, sizeof(new_ll));
     memset (new_grid, 0, sizeof(new_grid));
+    SCoord s;
+    char kbc;
+    UserInput ui = {
+        b,
+        NULL,
+        false,
+        NP_TIMEOUT,
+        false,
+        s,
+        kbc
+    };
     do {
 
         // always fresh
@@ -450,23 +457,13 @@ bool askNewPos (const SBox &b, LatLong &op_ll, char op_grid[MAID_CHARLEN])
         // handy current field number
         NPFieldName focus_fn = (NPFieldName)(focus_fp - fields);
 
-        // read input touch or keyboard, cancel if time out
-        uint32_t t0 = millis();
-        TouchType tt;
-        SCoord s;
-        char kbc = 0;
-        while (!cancelled
-                        && ((tt = readCalTouchWS(s)) == TT_NONE || !inBox (s, b))
-                        && (kbc = tft.getChar()) == 0) {
-            if (timesUp (&t0, NP_TIMEOUT))
-                cancelled = true;
-            wdDelay(100);
-            tft.drawPR();
-        }
-        if (cancelled)
+        // wait for user to do something or time out
+        if (!waitForUser(ui)) {
+            cancelled = true;
             continue;
+        }
 
-        // see whatever happened
+        // see what happened
         int tap = processNPTap (kbc, focus_fn, b, s);
         // Serial.printf (_FX("ask %d %c\n"), tap, isalnum(tap) ? tap : '*');
 

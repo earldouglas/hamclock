@@ -30,6 +30,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <math.h>
 #include <sys/ioctl.h>
@@ -160,6 +161,19 @@ void Adafruit_RA8875::setEarthPix (char *day_pixels, char *night_pixels)
 
 }
 
+#if defined(_USE_X11)
+/* called when our X11 thread gets an error talking to the X server.
+ * this happens when ESP::restart() closes the server connection.
+ * all we do is close down the thread so the default error handler doesn't exit the whole
+ * program before restart() can do the exec().
+ */
+static int myXIOErrorHandler (Display *dpy)
+{
+    (void) dpy;
+    pthread_exit(NULL);
+}
+#endif // _USE_X11
+
 bool Adafruit_RA8875::begin (int not_used)
 {
         (void)not_used;
@@ -202,7 +216,7 @@ bool Adafruit_RA8875::begin (int not_used)
             printf ("kb_lock: %s\n", strerror(errno));
             exit(1);
         }
-        kb_cqhead = kb_cqtail = 0;
+        kb_qhead = kb_qtail = 0;
 
         // set up a reentrantable lock for fb
         pthread_mutexattr_t fb_attr;
@@ -233,6 +247,8 @@ bool Adafruit_RA8875::begin (int not_used)
         XInitThreads();
 
 	// connect to X server
+        char *dpyenv = getenv ("DISPLAY");
+        printf ("DISPLAY=%s\n", dpyenv ? dpyenv : "<none>");
         display = XOpenDisplay(NULL);
 	if (!display) {
 	    printf ("Can not open X Windows display\n");
@@ -242,6 +258,9 @@ bool Adafruit_RA8875::begin (int not_used)
         int screen_num = XScreenNumberOfScreen(screen);
         Window root = RootWindow(display,screen_num);
 	unsigned long black_pixel = BlackPixelOfScreen (screen);
+
+        // exit gracefully if we get server error
+        XSetIOErrorHandler (myXIOErrorHandler);
 
 	// require TrueColor visual so we can use fb_canvas directly in img but try various depths
         XVisualInfo vinfo;
@@ -264,7 +283,7 @@ bool Adafruit_RA8875::begin (int not_used)
             printf ("Neither 24 nor 32 bit TrueColor visual found\n");
             exit(1);
         }
-#endif
+#endif // !_16BIT_FB
 
         visual = vinfo.visual;
 
@@ -299,7 +318,7 @@ bool Adafruit_RA8875::begin (int not_used)
 
 	// create window with initial size, user might resize later
 	XSetWindowAttributes wa;
-	wa.bit_gravity = NorthWestGravity;
+	wa.bit_gravity = StaticGravity;
 	wa.background_pixel = black_pixel;
 	unsigned long value_mask = CWBitGravity | CWBackPixel;
         win = XCreateWindow(display, root, 0, 0, fb_si.xres, fb_si.yres, 0, visdepth, InputOutput,
@@ -337,7 +356,11 @@ bool Adafruit_RA8875::begin (int not_used)
 
 	// enable desired X11 events
         XSelectInput (display, win, KeyPressMask | KeyReleaseMask | PointerMotionMask | LeaveWindowMask
-                | ButtonReleaseMask | ButtonPressMask | ExposureMask | StructureNotifyMask);
+            | ButtonReleaseMask | ButtonPressMask | ExposureMask | StructureNotifyMask);
+
+        // listen for close
+        wmDeleteMessage = XInternAtom(display, "WM_DELETE_WINDOW", False);
+        XSetWMProtocols(display, win, &wmDeleteMessage, 1);
 
 	// prep for mouse and keyboard info
 	if (pthread_mutex_init (&mouse_lock, NULL)) {
@@ -349,7 +372,7 @@ bool Adafruit_RA8875::begin (int not_used)
 	    printf ("kb_lock: %s\n", strerror(errno));
 	    exit(1);
 	}
-	kb_cqhead = kb_cqtail = 0;
+	kb_qhead = kb_qtail = 0;
 
 	// set up a reentrantable lock for fb
 	pthread_mutexattr_t fb_attr;
@@ -402,7 +425,7 @@ bool Adafruit_RA8875::begin (int not_used)
 	    printf ("kb_lock: %s\n", strerror(errno));
 	    exit(1);
 	}
-        kb_cqhead = kb_cqtail = 0;
+        kb_qhead = kb_qtail = 0;
 
 	// init for kb thread
         kb_fd = -1;
@@ -601,7 +624,15 @@ void Adafruit_RA8875::print (float f, int p)
 void Adafruit_RA8875::print (long l)
 {
 	char buf[32];
-	int sl = snprintf (buf, sizeof(buf), "%lu", l);
+	int sl = snprintf (buf, sizeof(buf), "%ld", l);
+	for (int i = 0; i < sl; i++)
+	    plotChar (buf[i]);
+}
+
+void Adafruit_RA8875::print (long long ll)
+{
+	char buf[32];
+	int sl = snprintf (buf, sizeof(buf), "%lld", ll);
 	for (int i = 0; i < sl; i++)
 	    plotChar (buf[i]);
 }
@@ -869,16 +900,13 @@ bool Adafruit_RA8875::getMouse (uint16_t *x, uint16_t *y)
  */
 void Adafruit_RA8875::setMouse (int x, int y)
 {
-        if (x >= 0 && x < APP_WIDTH && y >= 0 && y < APP_HEIGHT) {
+        pthread_mutex_lock(&mouse_lock);
 
-            pthread_mutex_lock(&mouse_lock);
+            mouse_x = x*SCALESZ + FB_X0;
+            mouse_y = y*SCALESZ + FB_Y0;
+            gettimeofday (&mouse_tv, NULL);
 
-                mouse_x = x*SCALESZ + FB_X0;
-                mouse_y = y*SCALESZ + FB_Y0;
-                gettimeofday (&mouse_tv, NULL);
-
-            pthread_mutex_unlock(&mouse_lock);
-        }
+        pthread_mutex_unlock(&mouse_lock);
 }
 
 
@@ -910,7 +938,7 @@ void Adafruit_RA8875::drawPixels (uint16_t * p, uint32_t count, int16_t x, int16
 
 /* location is fb coord system
  */
-void Adafruit_RA8875::drawSubPixel(int16_t x, int16_t y, uint16_t color16)
+void Adafruit_RA8875::drawPixelRaw(int16_t x, int16_t y, uint16_t color16)
 {
 	fbpix_t fbpix = RGB16TOFBPIX(color16);
 	pthread_mutex_lock(&fb_lock);
@@ -919,7 +947,7 @@ void Adafruit_RA8875::drawSubPixel(int16_t x, int16_t y, uint16_t color16)
 	pthread_mutex_unlock (&fb_lock);
 }
 
-/* always draws 1-pixel wide in screen pixels
+/* line in app coords
  */
 void Adafruit_RA8875::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color16)
 {
@@ -929,12 +957,12 @@ void Adafruit_RA8875::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, u
 	x1 *= SCALESZ;
 	y1 *= SCALESZ;
 	pthread_mutex_lock(&fb_lock);
-	    plotLine (x0, y0, x1, y1, fbpix);
+	    plotLineRaw (x0, y0, x1, y1, 1, fbpix);
 	    fb_dirty = true;
 	pthread_mutex_unlock (&fb_lock);
 }
 
-// non-standard -- width is in terms of app pixels, not screen pixels
+// non-standard -- add thickness arg
 void Adafruit_RA8875::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t thickness,
 uint16_t color16)
 {
@@ -945,10 +973,21 @@ uint16_t color16)
 	y1 *= SCALESZ;
         thickness *= SCALESZ;
 	pthread_mutex_lock(&fb_lock);
-            if (thickness == 1)
-                plotLine (x0, y0, x1, y1, fbpix);
-            else
-                drawThickLine (x0, y0, x1, y1, thickness, fbpix);
+	    plotLineRaw (x0, y0, x1, y1, thickness, fbpix);
+	    fb_dirty = true;
+	pthread_mutex_unlock (&fb_lock);
+}
+
+/* non-standard -- draw line in underlying raw coord system
+ */
+void Adafruit_RA8875::drawLineRaw(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t thickness,
+uint16_t color16)
+{
+	fbpix_t fbpix = RGB16TOFBPIX(color16);
+	pthread_mutex_lock(&fb_lock);
+	    plotLineRaw (x0, y0, x1, y1, thickness, fbpix);
+            // round cap style??
+            plotFillCircle (x1, y1, thickness/2-1, fbpix);
 	    fb_dirty = true;
 	pthread_mutex_unlock (&fb_lock);
 }
@@ -968,13 +1007,15 @@ void Adafruit_RA8875::drawRect(int16_t x0, int16_t y0, int16_t w, int16_t h, uin
         h -= 1;
 	w *= SCALESZ;
 	h *= SCALESZ;
-	pthread_mutex_lock (&fb_lock);
-	    plotLine (x0, y0, x0+w, y0, fbpix);
-	    plotLine (x0+w, y0, x0+w, y0+h, fbpix);
-	    plotLine (x0+w, y0+h, x0, y0+h, fbpix);
-	    plotLine (x0, y0+h, x0, y0, fbpix);
-	    fb_dirty = true;
-	pthread_mutex_unlock (&fb_lock);
+        plotDrawRect (x0, y0, w, h, fbpix);
+}
+
+/* non-standard -- draw rect in underlying raw coord system
+ */
+void Adafruit_RA8875::drawRectRaw (int16_t x0, int16_t y0, int16_t w, int16_t h, uint16_t color16)
+{
+	fbpix_t fbpix = RGB16TOFBPIX(color16);
+        plotDrawRect (x0, y0, w, h, fbpix);
 }
 
 /* Adafruit's fillRect of width w draws from x0 through x0+w-1, ie, it draws w pixels wide
@@ -990,12 +1031,15 @@ void Adafruit_RA8875::fillRect(int16_t x0, int16_t y0, int16_t w, int16_t h, uin
 	    h = 1;
 	w *= SCALESZ;
 	h *= SCALESZ;
-	pthread_mutex_lock (&fb_lock);
-	    for (uint16_t y = y0; y < y0+h; y++)
-		for (uint16_t x = x0; x < x0+w; x++)
-		    plotfb (x, y, fbpix);
-	    fb_dirty = true;
-	pthread_mutex_unlock (&fb_lock);
+        plotFillRect (x0, y0, w, h, fbpix);
+}
+
+/* non-standard -- fill rect to underlying raw coord system
+ */
+void Adafruit_RA8875::fillRectRaw(int16_t x0, int16_t y0, int16_t w, int16_t h, uint16_t color16)
+{
+	fbpix_t fbpix = RGB16TOFBPIX(color16);
+        plotFillRect (x0, y0, w, h, fbpix);
 }
 
 /* Adafruit's circle radius is counts beyond center, eg, radius 3 is 7 pixels wide
@@ -1006,22 +1050,15 @@ void Adafruit_RA8875::drawCircle(int16_t x0, int16_t y0, int16_t r0, uint16_t co
 	x0 *= SCALESZ;
 	y0 *= SCALESZ;
 	r0 *= SCALESZ;
+        plotDrawCircle (x0, y0, r0, fbpix);
+}
 
-        // scan a circle from radius r0-1/2 to r0+1/2 to include a whole pixel.
-        // radius (r0+1/2)^2 = r0^2 + r0 + 1/4 so we use 2x everywhere to avoid floats
-        uint32_t iradius2 = 4*r0*(r0 - 1) + 1;
-        uint32_t oradius2 = 4*r0*(r0 + 1) + 1;
-	pthread_mutex_lock (&fb_lock);
-	    for (int32_t dy = -2*r0; dy <= 2*r0; dy += 2) {
-                for (int32_t dx = -2*r0; dx <= 2*r0; dx += 2) {
-                    uint32_t xy2 = dx*dx + dy*dy;
-                    if (xy2 >= iradius2 && xy2 <= oradius2)
-			plotfb (x0+dx/2, y0+dy/2, fbpix);
-                }
-            }
-	    fb_dirty = true;
-	pthread_mutex_unlock (&fb_lock);
-
+/* non-standard -- draw circle to underlying raw coord system
+ */
+void Adafruit_RA8875::drawCircleRaw (int16_t x0, int16_t y0, int16_t r0, uint16_t color16)
+{
+	fbpix_t fbpix = RGB16TOFBPIX(color16);
+        plotDrawCircle (x0, y0, r0, fbpix);
 }
 
 /* Adafruit's circle radius is counts beyond center, eg, radius 3 is 7 pixels wide
@@ -1032,20 +1069,15 @@ void Adafruit_RA8875::fillCircle(int16_t x0, int16_t y0, int16_t r0, uint16_t co
 	x0 *= SCALESZ;
 	y0 *= SCALESZ;
 	r0 *= SCALESZ;
+        plotFillCircle (x0, y0, r0, fbpix);
+}
 
-        // scan a circle of radius r0+1/2 to include whole pixel.
-        // radius (r0+1/2)^2 = r0^2 + r0 + 1/4 so we use 2x everywhere to avoid floats
-        uint32_t radius2 = 4*r0*(r0 + 1) + 1;
-	pthread_mutex_lock (&fb_lock);
-	    for (int32_t dy = -2*r0; dy <= 2*r0; dy += 2) {
-                for (int32_t dx = -2*r0; dx <= 2*r0; dx += 2) {
-                    uint32_t xy2 = dx*dx + dy*dy;
-                    if (xy2 <= radius2)
-			plotfb (x0+dx/2, y0+dy/2, fbpix);
-                }
-            }
-	    fb_dirty = true;
-	pthread_mutex_unlock (&fb_lock);
+/* non-standard -- fill circle to underlying raw coord system
+ */
+void Adafruit_RA8875::fillCircleRaw(int16_t x0, int16_t y0, int16_t r0, uint16_t color16)
+{
+	fbpix_t fbpix = RGB16TOFBPIX(color16);
+        plotFillCircle (x0, y0, r0, fbpix);
 }
 
 void Adafruit_RA8875::drawTriangle(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t x2, int16_t y2,
@@ -1059,9 +1091,9 @@ void Adafruit_RA8875::drawTriangle(int16_t x0, int16_t y0, int16_t x1, int16_t y
 	x2 *= SCALESZ;
 	y2 *= SCALESZ;
 	pthread_mutex_lock (&fb_lock);
-	    plotLine (x0, y0, x1, y1, fbpix);
-	    plotLine (x1, y1, x2, y2, fbpix);
-	    plotLine (x2, y2, x0, y0, fbpix);
+	    plotLineRaw (x0, y0, x1, y1, 1, fbpix);
+	    plotLineRaw (x1, y1, x2, y2, 1, fbpix);
+	    plotLineRaw (x2, y2, x0, y0, 1, fbpix);
 	    fb_dirty = true;
 	pthread_mutex_unlock (&fb_lock);
 }
@@ -1089,18 +1121,18 @@ void Adafruit_RA8875::fillTriangle(int16_t x0, int16_t y0, int16_t x1, int16_t y
 
             // fill top subtri -- beware flat
             if (y1 != y0 && y2 != y0) {
-                for (int16_t y = y0; y < y1; y++) {
-                    int16_t xa = x0 + (y-y0)*(x1-x0)/(y1-y0);
-                    int16_t xb = x0 + (y-y0)*(x2-x0)/(y2-y0);
-                    plotLine (xa, y, xb, y, fbpix);
+                for (int y = y0; y < y1; y += 1) {
+                    int16_t xa = roundf (x0 + (float)(y-y0)*(x1-x0)/(y1-y0));
+                    int16_t xb = roundf (x0 + (float)(y-y0)*(x2-x0)/(y2-y0));
+                    plotLineRaw (xa, y, xb, y, 1, fbpix);
                 }
             }
             // fill bottom subtri -- beware flat
             if (y2 != y1 && y2 != y0) {
-                for (int16_t y = y1; y <= y2; y++) {
-                    int16_t xa = x1 + (y-y1)*(x2-x1)/(y2-y1);
-                    int16_t xb = x0 + (y-y0)*(x2-x0)/(y2-y0);
-                    plotLine (xa, y, xb, y, fbpix);
+                for (int y = y1; y <= y2; y += 1) {
+                    int16_t xa = roundf (x1 + (float)(y-y1)*(x2-x1)/(y2-y1));
+                    int16_t xb = roundf (x0 + (float)(y-y0)*(x2-x0)/(y2-y0));
+                    plotLineRaw (xa, y, xb, y, 1, fbpix);
                 }
             }
 
@@ -1114,19 +1146,106 @@ void Adafruit_RA8875::fillTriangle(int16_t x0, int16_t y0, int16_t x1, int16_t y
  */
 
 
+/* plot rect to native resolution
+ */
+void Adafruit_RA8875::plotDrawRect (int16_t x0, int16_t y0, int16_t w, int16_t h, fbpix_t fbpix)
+{
+	pthread_mutex_lock (&fb_lock);
+            if (w > 0) {
+                plotLineRaw (x0, y0, x0+w, y0, 1, fbpix);
+                plotLineRaw (x0+w, y0, x0+w, y0+h, 1, fbpix);
+                plotLineRaw (x0+w, y0+h, x0, y0+h, 1, fbpix);
+                plotLineRaw (x0, y0+h, x0, y0, 1, fbpix);
+                fb_dirty = true;
+            }
+	pthread_mutex_unlock (&fb_lock);
+}
+
+/* plot a filled rect to native resolution
+ */
+void Adafruit_RA8875::plotFillRect (int16_t x0, int16_t y0, int16_t w, int16_t h, fbpix_t fbpix)
+{
+	pthread_mutex_lock (&fb_lock);
+	    for (uint16_t y = y0; y < y0+h; y++)
+		for (uint16_t x = x0; x < x0+w; x++)
+		    plotfb (x, y, fbpix);
+	    fb_dirty = true;
+	pthread_mutex_unlock (&fb_lock);
+}
+
+/* plot circle to underlying raw coord system
+ */
+void Adafruit_RA8875::plotDrawCircle (int16_t x0, int16_t y0, int16_t r0, fbpix_t fbpix)
+{
+        // scan a circle from radius r0-1/2 to r0+1/2 to include a whole pixel.
+        // radius (r0+1/2)^2 = r0^2 + r0 + 1/4 so we use 2x everywhere to avoid floats
+        uint32_t iradius2 = 4*r0*(r0 - 1) + 1;
+        uint32_t oradius2 = 4*r0*(r0 + 1) + 1;
+	pthread_mutex_lock (&fb_lock);
+	    for (int32_t dy = -2*r0; dy <= 2*r0; dy += 2) {
+                for (int32_t dx = -2*r0; dx <= 2*r0; dx += 2) {
+                    uint32_t xy2 = dx*dx + dy*dy;
+                    if (xy2 >= iradius2 && xy2 <= oradius2)
+			plotfb (x0+dx/2, y0+dy/2, fbpix);
+                }
+            }
+	    fb_dirty = true;
+	pthread_mutex_unlock (&fb_lock);
+
+}
+
+/* plot a filled circle at native resolution
+ */
+void Adafruit_RA8875::plotFillCircle(int16_t x0, int16_t y0, int16_t r0, fbpix_t fbpix)
+{
+        // scan a circle of radius r0+1/2 to include whole pixel.
+        // radius (r0+1/2)^2 = r0^2 + r0 + 1/4 so we use 2x everywhere to avoid floats
+        uint32_t radius2 = 4*r0*(r0 + 1) + 1;
+	pthread_mutex_lock (&fb_lock);
+	    for (int32_t dy = -2*r0; dy <= 2*r0; dy += 2) {
+                for (int32_t dx = -2*r0; dx <= 2*r0; dx += 2) {
+                    uint32_t xy2 = dx*dx + dy*dy;
+                    if (xy2 <= radius2)
+			plotfb (x0+dx/2, y0+dy/2, fbpix);
+                }
+            }
+	    fb_dirty = true;
+	pthread_mutex_unlock (&fb_lock);
+}
+
+
+/********************************************************************************************************
+ *
+ * thick brezenham from https://github.com/ArminJo/Arduino-BlueDisplay/blob/master/src/LocalGUI/ThickLine.hpp
+ * 
+ */
+
+/*  STMF3-Discovery-Demos is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program. If not, see <http://www.gnu.org/licenses/gpl.html>.
+ */
 
 /*
- * thickLine.cpp
- * Draw a solid line with thickness using a modified Bresenhams algorithm.
- *
- * @date 25.03.2013
- * @author Armin Joachimsmeyer
- *      Email:   armin.joachimsmeyer@gmail.com
- * @copyright LGPL v3 (http://www.gnu.org/licenses/lgpl.html)
- * @version 1.5.0
- *
- * https://raw.githubusercontent.com/ArminJo/STMF3-Discovery-Demos/master/lib/graphics/src/thickLine.cpp
+ * Overlap means drawing additional pixel when changing minor direction
+ * Needed for drawThickLine, otherwise some pixels will be missing in the thick line
  */
+#define LINE_OVERLAP_NONE 0 	// No line overlap, like in standard Bresenham
+#define LINE_OVERLAP_MAJOR 0x01 // Overlap - first go major then minor direction. Pixel is drawn as extension after actual line
+#define LINE_OVERLAP_MINOR 0x02 // Overlap - first go minor then major direction. Pixel is drawn as extension before next line
+#define LINE_OVERLAP_BOTH 0x03  // Overlap - both
+
+#define LINE_THICKNESS_MIDDLE 0                 // Start point is on the line at center of the thick line
+#define LINE_THICKNESS_DRAW_CLOCKWISE 1         // Start point is on the counter clockwise border line
+#define LINE_THICKNESS_DRAW_COUNTERCLOCKWISE 2  // Start point is on the clockwise border line
 
 
 /**
@@ -1140,79 +1259,79 @@ void Adafruit_RA8875::fillTriangle(int16_t x0, int16_t y0, int16_t x1, int16_t y
  *         -0000+
  *             -00
  *
- *  0 pixels are drawn for normal line without any overlap
+ *  0 pixels are drawn for normal line without any overlap LINE_OVERLAP_NONE
  *  + pixels are drawn if LINE_OVERLAP_MAJOR
  *  - pixels are drawn if LINE_OVERLAP_MINOR
  */
-void Adafruit_RA8875::drawLineOverlap (int16_t x0, int16_t y0, int16_t x1, int16_t y1, int8_t overlap,
-fbpix_t color)
+
+/**
+ * Draws a line from aXStart/aYStart to aXEnd/aYEnd including both ends
+ * @param aOverlap One of LINE_OVERLAP_NONE, LINE_OVERLAP_MAJOR, LINE_OVERLAP_MINOR, LINE_OVERLAP_BOTH
+ */
+void Adafruit_RA8875::drawLineOverlap(int16_t aXStart, int16_t aYStart, int16_t aXEnd, int16_t aYEnd,
+uint8_t aOverlap, fbpix_t aColor)
 {
     int16_t tDeltaX, tDeltaY, tDeltaXTimes2, tDeltaYTimes2, tError, tStepX, tStepY;
 
-    if ((x0 == x1) || (y0 == y1)) {
-        //horizontal or vertical line
-        plotLineRaw (x0, y0, x1, y1, color);
+    // calculate direction
+    tDeltaX = aXEnd - aXStart;
+    tDeltaY = aYEnd - aYStart;
+    if (tDeltaX < 0) {
+        tDeltaX = -tDeltaX;
+        tStepX = -1;
     } else {
-        //calculate direction
-        tDeltaX = x1 - x0;
-        tDeltaY = y1 - y0;
-        if (tDeltaX < 0) {
-            tDeltaX = -tDeltaX;
-            tStepX = -1;
-        } else {
-            tStepX = +1;
-        }
-        if (tDeltaY < 0) {
-            tDeltaY = -tDeltaY;
-            tStepY = -1;
-        } else {
-            tStepY = +1;
-        }
-        tDeltaXTimes2 = tDeltaX << 1;
-        tDeltaYTimes2 = tDeltaY << 1;
-        //draw start pixel
-        plotfb(x0, y0, color);
-        if (tDeltaX > tDeltaY) {
-            // start value represents a half step in Y direction
-            tError = tDeltaYTimes2 - tDeltaX;
-            while (x0 != x1) {
-                // step in main direction
-                x0 += tStepX;
-                if (tError >= 0) {
-                    if (overlap & LINE_OVERLAP_MAJOR) {
-                        // draw pixel in main direction before changing
-                        plotfb(x0, y0, color);
-                    }
-                    // change Y
-                    y0 += tStepY;
-                    if (overlap & LINE_OVERLAP_MINOR) {
-                        // draw pixel in minor direction before changing
-                        plotfb(x0 - tStepX, y0, color);
-                    }
-                    tError -= tDeltaXTimes2;
+        tStepX = +1;
+    }
+    if (tDeltaY < 0) {
+        tDeltaY = -tDeltaY;
+        tStepY = -1;
+    } else {
+        tStepY = +1;
+    }
+    tDeltaXTimes2 = tDeltaX << 1;
+    tDeltaYTimes2 = tDeltaY << 1;
+    // draw start pixel
+    plotfb(aXStart, aYStart, aColor);
+    if (tDeltaX > tDeltaY) {
+        // start value represents a half step in Y direction
+        tError = tDeltaYTimes2 - tDeltaX;
+        while (aXStart != aXEnd) {
+            // step in main direction
+            aXStart += tStepX;
+            if (tError >= 0) {
+                if (aOverlap & LINE_OVERLAP_MAJOR) {
+                    // draw pixel in main direction before changing
+                    plotfb (aXStart, aYStart, aColor);
                 }
-                tError += tDeltaYTimes2;
-                plotfb(x0, y0, color);
-            }
-        } else {
-            tError = tDeltaXTimes2 - tDeltaY;
-            while (y0 != y1) {
-                y0 += tStepY;
-                if (tError >= 0) {
-                    if (overlap & LINE_OVERLAP_MAJOR) {
-                        // draw pixel in main direction before changing
-                        plotfb(x0, y0, color);
-                    }
-                    x0 += tStepX;
-                    if (overlap & LINE_OVERLAP_MINOR) {
-                        // draw pixel in minor direction before changing
-                        plotfb(x0, y0 - tStepY, color);
-                    }
-                    tError -= tDeltaYTimes2;
+                // change Y
+                aYStart += tStepY;
+                if (aOverlap & LINE_OVERLAP_MINOR) {
+                    // draw pixel in minor direction before changing
+                    plotfb (aXStart - tStepX, aYStart, aColor);
                 }
-                tError += tDeltaXTimes2;
-                plotfb(x0, y0, color);
+                tError -= tDeltaXTimes2;
             }
+            tError += tDeltaYTimes2;
+            plotfb (aXStart, aYStart, aColor);
+        }
+    } else {
+        tError = tDeltaXTimes2 - tDeltaY;
+        while (aYStart != aYEnd) {
+            aYStart += tStepY;
+            if (tError >= 0) {
+                if (aOverlap & LINE_OVERLAP_MAJOR) {
+                    // draw pixel in main direction before changing
+                    plotfb (aXStart, aYStart, aColor);
+                }
+                aXStart += tStepX;
+                if (aOverlap & LINE_OVERLAP_MINOR) {
+                    // draw pixel in minor direction before changing
+                    plotfb (aXStart, aYStart - tStepY, aColor);
+                }
+                tError -= tDeltaYTimes2;
+            }
+            tError += tDeltaXTimes2;
+            plotfb (aXStart, aYStart, aColor);
         }
     }
 }
@@ -1220,14 +1339,16 @@ fbpix_t color)
 /**
  * Bresenham with thickness
  * No pixel missed and every pixel only drawn once!
+ * aThicknessMode can be one of LINE_THICKNESS_MIDDLE, LINE_THICKNESS_DRAW_CLOCKWISE, LINE_THICKNESS_DRAW_COUNTERCLOCKWISE
  */
-void Adafruit_RA8875::drawThickLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
-int16_t thick, fbpix_t color)
+void Adafruit_RA8875::drawThickLine (int16_t aXStart, int16_t aYStart, int16_t aXEnd, int16_t aYEnd,
+int16_t aThickness, uint8_t aThicknessMode, fbpix_t aColor)
 {
     int16_t i, tDeltaX, tDeltaY, tDeltaXTimes2, tDeltaYTimes2, tError, tStepX, tStepY;
 
-    if (thick <= 1) {
-        drawLineOverlap(x0, y0, x1, y1, LINE_OVERLAP_NONE, color); 
+    if (aThickness <= 1) {
+        drawLineOverlap(aXStart, aYStart, aXEnd, aYEnd, LINE_OVERLAP_BOTH, aColor);
+        return;
     }
 
     /**
@@ -1236,8 +1357,8 @@ int16_t thick, fbpix_t color)
      * or counterclockwise (new delta Y inverted) rectangular direction.
      * The right rectangular direction for LINE_OVERLAP_MAJOR toggles with each octant
      */
-    tDeltaY = x1 - x0;
-    tDeltaX = y1 - y0;
+    tDeltaY = aXEnd - aXStart;
+    tDeltaX = aYEnd - aYStart;
     // mirror 4 quadrants to one and adjust deltas and stepping direction
     bool tSwap = true; // count effective mirroring
     if (tDeltaX < 0) {
@@ -1258,47 +1379,57 @@ int16_t thick, fbpix_t color)
     tDeltaYTimes2 = tDeltaY << 1;
     bool tOverlap;
     // adjust for right direction of thickness from line origin
-    int tDrawStartAdjustCount = thick / 2;
+    int tDrawStartAdjustCount = aThickness / 2;
+    if (aThicknessMode == LINE_THICKNESS_DRAW_COUNTERCLOCKWISE) {
+        tDrawStartAdjustCount = aThickness - 1;
+    } else if (aThicknessMode == LINE_THICKNESS_DRAW_CLOCKWISE) {
+        tDrawStartAdjustCount = 0;
+    }
 
+    /*
+     * Now tDelta* are positive and tStep* define the direction
+     * tSwap is false if we mirrored only once
+     */
     // which octant are we now
     if (tDeltaX >= tDeltaY) {
+        // Octant 1, 3, 5, 7 (between 0 and 45, 90 and 135, ... degree)
         if (tSwap) {
-            tDrawStartAdjustCount = (thick - 1) - tDrawStartAdjustCount;
+            tDrawStartAdjustCount = (aThickness - 1) - tDrawStartAdjustCount;
             tStepY = -tStepY;
         } else {
             tStepX = -tStepX;
         }
         /*
-         * Vector for draw direction of start of lines is rectangular and counterclockwise to main line direction
+         * Vector for draw direction of the starting points of lines is rectangular and counterclockwise to main line direction
          * Therefore no pixel will be missed if LINE_OVERLAP_MAJOR is used on change in minor rectangular direction
          */
         // adjust draw start point
         tError = tDeltaYTimes2 - tDeltaX;
         for (i = tDrawStartAdjustCount; i > 0; i--) {
             // change X (main direction here)
-            x0 -= tStepX;
-            x1 -= tStepX;
+            aXStart -= tStepX;
+            aXEnd -= tStepX;
             if (tError >= 0) {
                 // change Y
-                y0 -= tStepY;
-                y1 -= tStepY;
+                aYStart -= tStepY;
+                aYEnd -= tStepY;
                 tError -= tDeltaXTimes2;
             }
             tError += tDeltaYTimes2;
         }
-        //draw start line
-        plotLineRaw(x0, y0, x1, y1, color);
-        // draw thick number of lines
+        // draw start line. We can alternatively use drawLineOverlap(aXStart, aYStart, aXEnd, aYEnd, LINE_OVERLAP_NONE, aColor) here.
+        drawLineOverlap(aXStart, aYStart, aXEnd, aYEnd, LINE_OVERLAP_NONE, aColor);
+        // draw aThickness number of lines
         tError = tDeltaYTimes2 - tDeltaX;
-        for (i = thick; i > 1; i--) {
+        for (i = aThickness; i > 1; i--) {
             // change X (main direction here)
-            x0 += tStepX;
-            x1 += tStepX;
+            aXStart += tStepX;
+            aXEnd += tStepX;
             tOverlap = LINE_OVERLAP_NONE;
             if (tError >= 0) {
                 // change Y
-                y0 += tStepY;
-                y1 += tStepY;
+                aYStart += tStepY;
+                aYEnd += tStepY;
                 tError -= tDeltaXTimes2;
                 /*
                  * Change minor direction reverse to line (main) direction
@@ -1314,128 +1445,83 @@ int16_t thick, fbpix_t color)
                  *   3333-222211
                  * 33-22221111
                  *  221111                     /\
-				 *  11                          Main direction of start of lines draw vector
+                 *  11                          Main direction of start of lines draw vector
                  *  -> Line main direction
                  *  <- Minor direction of counterclockwise of start of lines draw vector
                  */
                 tOverlap = LINE_OVERLAP_MAJOR;
             }
             tError += tDeltaYTimes2;
-            drawLineOverlap(x0, y0, x1, y1, tOverlap, color);
+            drawLineOverlap(aXStart, aYStart, aXEnd, aYEnd, tOverlap, aColor);
         }
     } else {
-        // the other octant
+        // the other octant 2, 4, 6, 8 (between 45 and 90, 135 and 180, ... degree)
         if (tSwap) {
             tStepX = -tStepX;
         } else {
-            tDrawStartAdjustCount = (thick - 1) - tDrawStartAdjustCount;
+            tDrawStartAdjustCount = (aThickness - 1) - tDrawStartAdjustCount;
             tStepY = -tStepY;
         }
         // adjust draw start point
         tError = tDeltaXTimes2 - tDeltaY;
         for (i = tDrawStartAdjustCount; i > 0; i--) {
-            y0 -= tStepY;
-            y1 -= tStepY;
+            aYStart -= tStepY;
+            aYEnd -= tStepY;
             if (tError >= 0) {
-                x0 -= tStepX;
-                x1 -= tStepX;
+                aXStart -= tStepX;
+                aXEnd -= tStepX;
                 tError -= tDeltaYTimes2;
             }
             tError += tDeltaXTimes2;
         }
         //draw start line
-        plotLineRaw(x0, y0, x1, y1, color);
-        // draw thick number of lines
+        drawLineOverlap(aXStart, aYStart, aXEnd, aYEnd, LINE_OVERLAP_NONE, aColor);
+        // draw aThickness number of lines
         tError = tDeltaXTimes2 - tDeltaY;
-        for (i = thick; i > 1; i--) {
-            y0 += tStepY;
-            y1 += tStepY;
+        for (i = aThickness; i > 1; i--) {
+            aYStart += tStepY;
+            aYEnd += tStepY;
             tOverlap = LINE_OVERLAP_NONE;
             if (tError >= 0) {
-                x0 += tStepX;
-                x1 += tStepX;
+                aXStart += tStepX;
+                aXEnd += tStepX;
                 tError -= tDeltaYTimes2;
                 tOverlap = LINE_OVERLAP_MAJOR;
             }
             tError += tDeltaXTimes2;
-            drawLineOverlap(x0, y0, x1, y1, tOverlap, color);
+            drawLineOverlap(aXStart, aYStart, aXEnd, aYEnd, tOverlap, aColor);
         }
     }
 }
 
-void Adafruit_RA8875::plotLineLow(int16_t x0, int16_t y0, int16_t x1, int16_t y1, fbpix_t color)
-{
-        int16_t dx = x1 - x0;
-        int16_t dy = y1 - y0;
-        int16_t yi = 1;
 
-        if (dy < 0) {
-            yi = -1;
-            dy = -dy;
-        }
-        int16_t D = 2*dy - dx;
-        int16_t y = y0;
-
-        for (int16_t x = x0; x <= x1; x++) {
-            plotfb(x,y,color);
-            if (D > 0) {
-                y = y + yi;
-                D = D - 2*dx;
-            }
-            D = D + 2*dy;
-        }
-}
-
-void Adafruit_RA8875::plotLineHigh(int16_t x0, int16_t y0, int16_t x1, int16_t y1, fbpix_t color)
-{
-        int16_t dx = x1 - x0;
-        int16_t dy = y1 - y0;
-        int16_t xi = 1;
-
-        if (dx < 0) {
-            xi = -1;
-            dx = -dx;
-        }
-        int16_t D = 2*dx - dy;
-        int16_t x = x0;
-
-        for (int16_t y = y0; y <= y1; y++) {
-            plotfb(x,y,color);
-            if (D > 0) {
-                x = x + xi;
-                D = D - 2*dy;
-            }
-            D = D + 2*dx;
-        }
-}
-
-/* plot line using Bresenham's algorithm.
- * https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm
+/* brezenham entry point, raw fb coords.
  */
-void Adafruit_RA8875::plotLineRaw(int16_t x0, int16_t y0, int16_t x1, int16_t y1, fbpix_t color)
+void Adafruit_RA8875::plotLineRaw (int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+int16_t thick, fbpix_t color)
 {
-        if (abs(y1 - y0) < abs(x1 - x0)) {
-            if (x0 > x1)
-                plotLineLow(x1, y1, x0, y0, color);
-            else
-                plotLineLow(x0, y0, x1, y1, color);
-        } else {
-            if (y0 > y1)
-                plotLineHigh(x1, y1, x0, y0, color);
-            else
-                plotLineHigh(x0, y0, x1, y1, color);
-        }
+    drawThickLine (x0, y0, x1, y1, thick, LINE_THICKNESS_MIDDLE, color);
 }
 
 
-void Adafruit_RA8875::plotLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, fbpix_t color)
-{
-        plotLineRaw (x0, y0, x1, y1, color);
-}
 
+/*
+ * end of thick brezenham
+ * 
+ *********************************************************************************************************/
+
+
+
+
+/* place the given raw pixel at the given raw frame buffer location.
+ */
 void Adafruit_RA8875::plotfb (int16_t x, int16_t y, fbpix_t color)
 {
-        fb_canvas[y*FB_XRES + x] = color;
+        int index = y*FB_XRES + x;
+        if (index < 0 || index >= FB_XRES*FB_YRES)
+            printf ("no! %d %d\n", x, y);
+        else
+            fb_canvas[index] = color;
 }
 
 /* plot hi res earth lat0,lng0 at app's screen location x0,y0.
@@ -1549,16 +1635,22 @@ void Adafruit_RA8875::drawPR(void)
 }
 
 
-/* return a typed character, else 0
+/* return a typed character and current modifier keys if interested (may be NULL), else 0
  */
-char Adafruit_RA8875::getChar()
+char Adafruit_RA8875::getChar(bool *control_set, bool *shift_set)
 {
     char c = 0;
     pthread_mutex_lock (&kb_lock);
-        if (kb_cqhead != kb_cqtail) {
-            c = kb_cq[kb_cqhead];
-            if (++kb_cqhead == sizeof(kb_cq))
-                kb_cqhead = 0;
+        if (kb_qhead != kb_qtail) {
+            KBState &ks = kb_q[kb_qhead];
+            c = ks.c;
+            if (control_set)
+                *control_set = ks.control;
+            if (shift_set)
+                *shift_set = ks.shift;
+            if (++kb_qhead == KB_N)
+                kb_qhead = 0;
+            // printf ("getChar= 0x%x %c\n", c, c);
         }
     pthread_mutex_unlock (&kb_lock);
     return (c);
@@ -1569,9 +1661,12 @@ char Adafruit_RA8875::getChar()
 void Adafruit_RA8875::putChar (char c)
 {
     pthread_mutex_lock (&kb_lock);
-        kb_cq[kb_cqtail] = c;
-        if (++kb_cqtail == sizeof(kb_cq))
-            kb_cqtail = 0;
+        KBState &ks = kb_q[kb_qtail];
+        ks.c = c;
+        ks.control = false;
+        ks.shift = false;
+        if (++kb_qtail == KB_N)
+            kb_qtail = 0;
     pthread_mutex_unlock (&kb_lock);
 }
 
@@ -1680,6 +1775,113 @@ void Adafruit_RA8875::X11OptionsEngageNow (bool fs)
             usleep (1000);
 }
 
+/* called with KeySym and XKeyEvent state to request PRIMARY or CLIPBOARD selection for pasting.
+ * return whether the kb command really was for a paste operation.
+ */
+// _USE_X11
+bool Adafruit_RA8875::requestSelection (KeySym ks, unsigned kb_state)
+{
+        if (ks == XK_v) {
+
+            // try CLIPBOARD
+            unsigned m1 = ControlMask;                  // xterm uses control-v
+            if (kb_state == m1) {
+                // request CLIPBOARD buffer conversion -- will soon generate SelectionNotify if any
+                Atom bufid   = XInternAtom(display, "CLIPBOARD", False),
+                     fmtid   = XInternAtom(display, "STRING", False),
+                     propid  = XInternAtom(display, "XSEL_DATA", False);
+                // printf ("ask for CLIPBOARD\n");
+                (void) XConvertSelection (display, bufid, fmtid, propid, win, CurrentTime);
+                return (true);
+            }
+
+            // try PRIMARY
+            unsigned m2 = Mod2Mask;                     // macOS uses command-v
+            unsigned m3 = ShiftMask|ControlMask;        // gtk shift-control-v
+            if (kb_state == m2 || kb_state == m3) {
+                // request PRIMARY buffer conversion -- will soon generate SelectionNotify if any
+                Atom bufid   = XInternAtom(display, "PRIMARY", False),
+                     fmtid   = XInternAtom(display, "STRING", False),
+                     propid  = XInternAtom(display, "XSEL_DATA", False);
+                // printf ("ask for PRIMARY\n");
+                (void) XConvertSelection (display, bufid, fmtid, propid, win, CurrentTime);
+                return (true);
+            }
+        }
+
+        // nope, nothing special
+        return (false);
+}
+
+/* called on receipt of SelectionNotify to capture the PRIMARY selection and push onto keyboard queue.
+ * https://stackoverflow.com/questions/27378318/c-get-string-from-clipboard-on-linux/44992938#44992938
+ */
+// _USE_X11
+void Adafruit_RA8875::captureSelection()
+{
+        unsigned char *result;
+        unsigned long ressize, restail;
+        int resbits;
+        Atom fmtid   = XInternAtom(display, "STRING", False),
+             propid  = XInternAtom(display, "XSEL_DATA", False);
+
+        if (Success == XGetWindowProperty (display, win, propid, 0, 100, False,
+                                AnyPropertyType, &fmtid, &resbits, &ressize, &restail, &result)
+                        && resbits == 8) { // means result is array of char
+
+            // inject selection into kb q
+            for (unsigned i = 0; i < ressize; i++)
+                putChar (result[i]);
+
+            XFree(result);
+        }
+}
+
+// _USE_X11
+void Adafruit_RA8875::encodeKeyEvent (XKeyEvent *event)
+{
+        char c = 0;
+        char buf[10];
+
+        // check a few values of interest
+        KeySym ks = XLookupKeysym (event, 0);
+        switch (ks) {
+        case XK_Left:           // convert to vi's h
+            c = 'h';
+            break;
+        case XK_Down:           // convert to vi's j
+            c = 'j';
+            break;
+        case XK_Up:             // convert to vi's k
+            c = 'k';
+            break;
+        case XK_Right:          // convert to vi's l
+            c = 'l';
+            break;
+        case XK_v:              // might be paste
+            if (requestSelection (XK_v, event->state))
+                return;
+            break;
+        }
+
+        // if nothing yet try a string
+        if (!c && XLookupString (event, buf, sizeof(buf), NULL, NULL) > 0)
+            c = buf[0];
+
+        // enqueue if recognized
+        if (c) {
+            pthread_mutex_lock (&kb_lock);
+            KBState &ks = kb_q[kb_qtail];
+            ks.c = c;
+            ks.control = (event->state & (ControlMask|Mod1Mask)) != 0;
+            ks.shift = (event->state & ShiftMask) != 0;
+            if (++kb_qtail == KB_N)
+                kb_qtail = 0;
+            pthread_mutex_unlock (&kb_lock);
+            // printf ("encode key= 0x%x %c\n", c, c);
+        }
+}
+
 /* thread that runs forever reacting to X11 events and painting fb_canvas whenever it changes
  */
 // _USE_X11
@@ -1699,10 +1901,8 @@ void Adafruit_RA8875::fbThread ()
         bool cursor_on = true;
 
         // create red application cursor
-        char mask_data[FB_CURSOR_SZ*FB_CURSOR_SZ/8];            // bitmask of active pixels forming arrow
-        memset (mask_data, 0, FB_CURSOR_SZ*FB_CURSOR_SZ/8);
-        char cur_data[FB_CURSOR_SZ*FB_CURSOR_SZ/8];             // bitmask of fg pixels else bg color
-        memset (cur_data, 0, FB_CURSOR_SZ*FB_CURSOR_SZ/8);    
+        char *mask_data = (char*)calloc (FB_CURSOR_SZ,FB_CURSOR_SZ/8); // bitmask of active pixels
+        char *cur_data = (char*)calloc (FB_CURSOR_SZ,FB_CURSOR_SZ/8);  // bitmask of fg pixels else bg color
         // fill top half sans border
         for (uint16_t r = 0; r < FB_CURSOR_SZ/2; r++) {
             for (uint16_t c = r/2+1; c < 2*r-1; c++) {
@@ -1786,7 +1986,7 @@ void Adafruit_RA8875::fbThread ()
             // X11 options are deferred until explicitly enabled; reset options_engage after each use.
             if (options_engage) {
 
-                printf ("options_engage: %d\n", options_fullscreen);
+                // printf ("options_engage: %d\n", options_fullscreen);
 
                 // add or remove _NET_WM_STATE_FULLSCREEN from _NET_WM_STATE
                 // see https://specifications.freedesktop.org/wm-spec
@@ -1822,25 +2022,29 @@ void Adafruit_RA8875::fbThread ()
 				event.xexpose.width, event.xexpose.height, event.xexpose.x, event.xexpose.y);
 		    break;
 
+                case SelectionNotify:
+                    // printf ("SelectionNotify\n");
+
+                    if (event.xselection.property)
+                        captureSelection();
+                    break;
+
                 case KeyPress:
-                    // just record time to start repeating
+                    // printf ("KeyPress\n");
+
+                    // just record time to start repeating, get actual key when released
                     gettimeofday (&kp0, NULL);
                     break;
 
                 case KeyRelease:
-                    {
-                        char buf[10];
-                        if (XLookupString ((XKeyEvent*)&event, buf, sizeof(buf), NULL, NULL) > 0) {
-                            pthread_mutex_lock (&kb_lock);
-                                kb_cq[kb_cqtail] = buf[0];
-                                if (++kb_cqtail == sizeof(kb_cq))
-                                    kb_cqtail = 0;
-                            pthread_mutex_unlock (&kb_lock);
-                        }
-                    }
+                    // printf ("KeyRelease\n");
+
+                    encodeKeyEvent ((XKeyEvent*)&event);
 		    break;
 
 		case ButtonPress:
+                    // printf ("ButtonPress   %ld.%06ld\n", mouse_tv.tv_sec, mouse_tv.tv_usec);
+
 		    pthread_mutex_lock (&mouse_lock);
 			mouse_x = event.xbutton.x;
 			mouse_y = event.xbutton.y;
@@ -1850,11 +2054,11 @@ void Adafruit_RA8875::fbThread ()
                     // record time of mouse situation change for cursor fade
                     gettimeofday (&mouse_tv, NULL);
 
-                    // printf ("press   %ld.%06ld\n", mouse_tv.tv_sec, mouse_tv.tv_usec);
-
 		    break;
 
 		case ButtonRelease:
+                    // printf ("ButtonRelease  %ld.%06ld\n", mouse_tv.tv_sec, mouse_tv.tv_usec);
+
 		    pthread_mutex_lock (&mouse_lock);
 			mouse_x = event.xbutton.x;
 			mouse_y = event.xbutton.y;
@@ -1864,11 +2068,10 @@ void Adafruit_RA8875::fbThread ()
                     // record time of mouse situation change for cursor fade
                     gettimeofday (&mouse_tv, NULL);
 
-                    // printf ("release %ld.%06ld\n", mouse_tv.tv_sec, mouse_tv.tv_usec);
-
 		    break;
 
                 case LeaveNotify:
+                    // printf ("LeaveNotify\n");
 
                     // indicate mouse not valid
 		    pthread_mutex_lock (&mouse_lock);
@@ -1879,10 +2082,11 @@ void Adafruit_RA8875::fbThread ()
 
 
                 case MotionNotify:
+                    // printf ("MotionNotify %d %d\n", event.xmotion.x, event.xmotion.y);
 
 		    pthread_mutex_lock (&mouse_lock);
-			mouse_x = event.xbutton.x;
-			mouse_y = event.xbutton.y;
+			mouse_x = event.xmotion.x;
+			mouse_y = event.xmotion.y;
 		    pthread_mutex_unlock (&mouse_lock);
 
                     // record time of mouse situation change for cursor fade
@@ -1904,6 +2108,13 @@ void Adafruit_RA8875::fbThread ()
                     // invalidate staging area to get a full refresh
                     memset (fb_stage, ~0, fb_nbytes);
 		    break;
+
+                case ClientMessage:
+                    if ((Atom)event.xclient.data.l[0] == wmDeleteMessage) {
+                        XCloseDisplay(display);
+                        doExit();
+                    }
+                    break;
 		}
 	    }
 
@@ -1916,21 +2127,14 @@ void Adafruit_RA8875::fbThread ()
                 }
             pthread_mutex_unlock (&fb_lock);
 
-            // generate another char if key still pressed
+            // implement auto-repeat
             if (event.type == KeyPress) {
-                struct timeval tv0;
-                gettimeofday (&tv0, NULL);
-                int dt_ms = (tv0.tv_sec - kp0.tv_sec)*1000 + (tv0.tv_usec - kp0.tv_usec)/1000;
+                struct timeval tv;
+                gettimeofday (&tv, NULL);
+                int dt_ms = (tv.tv_sec - kp0.tv_sec)*1000 + (tv.tv_usec - kp0.tv_usec)/1000;
                 if (dt_ms > 400) {
-                    char buf[10];
-                    if (XLookupString ((XKeyEvent*)&event, buf, sizeof(buf), NULL, NULL) > 0) {
-                        pthread_mutex_lock (&kb_lock);
-                            kb_cq[kb_cqtail++] = buf[0];
-                            if (kb_cqtail == sizeof(kb_cq))
-                                kb_cqtail = 0;
-                        pthread_mutex_unlock (&kb_lock);
-                    }
-                    kp0 = tv0;
+                    encodeKeyEvent ((XKeyEvent*)&event);
+                    kp0 = tv;
                 }
             }
 
@@ -1948,6 +2152,52 @@ void Adafruit_RA8875::getScreenSize (int *w, int *h)
         int snum = DefaultScreen(display);
         *w = DisplayWidth(display, snum);
         *h = DisplayHeight(display, snum);
+}
+
+/* move cursor n app pixels in the given hjkl direction then pass back the resulting position if interested.
+ * ignore dir if not one of hjkl. just pass back current position if n is 0.
+ * return whether cursor really is over our window.
+ */
+// _USE_X11
+bool Adafruit_RA8875::warpCursor (char dir, unsigned n, int *xp, int *yp)
+{
+        Window root_w, child_w;
+        int root_x, root_y;
+        int win_x, win_y;
+        unsigned int mask;
+
+        // get current position at full resolution
+        if (!XQueryPointer (display, win, &root_w, &child_w, &root_x, &root_y, &win_x, &win_y, &mask)) {
+            printf ("XQueryPointer failed\n");
+            return (false);
+        }
+
+        int new_x = win_x, new_y = win_y;
+
+        // move by n app positions
+        switch (dir) {
+        case 'h': new_x = win_x-n*SCALESZ; break;       // left
+        case 'j': new_y = win_y+n*SCALESZ; break;       // down
+        case 'k': new_y = win_y-n*SCALESZ; break;       // up
+        case 'l': new_x = win_x+n*SCALESZ; break;       // right
+        default: break;
+        }
+
+        // beware wrap
+        new_x = FB_X0 + ((new_x-FB_X0 + FB_XRES)%FB_XRES);
+        new_y = FB_Y0 + ((new_y-FB_Y0 + FB_YRES)%FB_YRES);
+
+        // printf ("warp from %d %d  to  %d %d\n", win_x, win_y, new_x, new_y);
+
+        // move cursor using deltas, we've already insured the move will be in bounds
+        XWarpPointer (display, None, None, 0, 0, 0, 0, new_x-win_x, new_y-win_y);
+
+        // pass back in app coords if interested
+        if (xp) *xp = (new_x-FB_X0)/SCALESZ;
+        if (yp) *yp = (new_y-FB_Y0)/SCALESZ;
+
+        // worked ok
+        return (true);
 }
 
 #endif	// _USE_X11
@@ -2297,6 +2547,45 @@ void Adafruit_RA8875::mouseThread (void)
         }
 }
 
+/* move cursor n app pixels in the given hjkl direction then pass back the resulting position if interested.
+ * ignore dir if not one of hjkl. just pass back current position if n is 0.
+ * return whether cursor really is over our window.
+ */
+// _USE_FB0
+bool Adafruit_RA8875::warpCursor (char dir, unsigned n, int *xp, int *yp)
+{
+        int new_x = mouse_x, new_y = mouse_y;
+
+        // move by n app positions
+        switch (dir) {
+        case 'h': new_x = mouse_x-n*SCALESZ; break;       // left
+        case 'j': new_y = mouse_y+n*SCALESZ; break;       // down
+        case 'k': new_y = mouse_y-n*SCALESZ; break;       // up
+        case 'l': new_x = mouse_x+n*SCALESZ; break;       // right
+        default: break;
+        }
+
+        // beware wrap
+        new_x = FB_X0 + ((new_x-FB_X0 + FB_XRES)%FB_XRES);
+        new_y = FB_Y0 + ((new_y-FB_Y0 + FB_YRES)%FB_YRES);
+
+        // printf ("warp from %d %d  to  %d %d\n", mouse_x, mouse_y, new_x, new_y);
+
+        // convert to app coords
+        int new_x_app = (new_x-FB_X0)/SCALESZ;
+        int new_y_app = (new_y-FB_Y0)/SCALESZ;
+
+        // update cursor location; we've already insured the move will be in bounds
+        setMouse (new_x_app, new_y_app);
+
+        // pass back in app coords if interested
+        if (xp) *xp = new_x_app;
+        if (yp) *yp = new_y_app;
+
+        // worked ok
+        return (true);
+}
+
 // _USE_FB0
 void *Adafruit_RA8875::kbThreadHelper(void *me)
 {
@@ -2314,7 +2603,7 @@ void Adafruit_RA8875::kbThread ()
         // first try immediately
         findKeyboard();
 
-	// block until get kb char, then store in kb_cq
+	// block until get kb char, then store in kb_q
 	for(;;) {
 
             // look for kb occasionaly if none
@@ -2329,12 +2618,26 @@ void Adafruit_RA8875::kbThread ()
 	    int nr = read (kb_fd, buf, 1);
 	    if (nr == 1) {
 		pthread_mutex_lock (&kb_lock);
-                    kb_cq[kb_cqtail++] = buf[0];
-                    if (kb_cqtail == sizeof(kb_cq))
-                        kb_cqtail = 0;
+                    printf ("KB: %d %c\n", buf[0], buf[0]);
+                    KBState &ks = kb_q[kb_qtail];
+                    if (isupper(buf[0])) {
+                        ks.c = tolower(buf[0]);
+                        ks.control = false;
+                        ks.shift = true;
+                    } else if (buf[0] == '\10' || buf[0] == '\13' || buf[0] == '\14') {
+                        // one of ^hkl for keyboard cursor control; but not ^j because that's Enter
+                        ks.c = buf[0] + 96;     // convert to lower case printable char...
+                        ks.control = true;      // ... with control set
+                        ks.shift = false;
+                    } else {
+                        ks.c = buf[0];
+                        ks.control = false;
+                        ks.shift = false;
+                    }
+                    if (++kb_qtail == KB_N)
+                        kb_qtail = 0;
 		    fb_dirty = true;
 		pthread_mutex_unlock (&kb_lock);
-                // printf ("KB: %d %c\n", buf[0], buf[0]);
 	    } else {
                 if (nr < 0)
                     printf ("KB: %s\n", strerror(errno));

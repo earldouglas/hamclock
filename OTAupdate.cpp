@@ -23,12 +23,13 @@ static const char v_page[] PROGMEM = "/version.pl";
 #define PBAR_INDENT     30                              // left and right indent
 #define PBAR_H          30                              // progress bar height
 #define PBAR_W          (tft.width()-2*PBAR_INDENT)     // progress bar width
-#define FLASHBPS        60000                           // approx flash rate, b/s
 
 static uint16_t pbar_x0, pbar_y0;                       // lower left of progress bar
 
 
 #if defined(_IS_ESP8266)
+
+#define FLASHBPS        60000                           // approx flash rate, b/s
 
 /* called by ESPhttpUpdate during download with bytes so far and total.
  */
@@ -73,12 +74,12 @@ bool newVersionIsAvailable (char *new_ver, uint16_t new_verl)
     char line[100];
     bool found_newer = false;
 
-    Serial.print (svr_host); Serial.println (v_page);
-    if (wifiOk() && v_client.connect (svr_host, HTTPPORT)) {
+    Serial.printf (_FX("%s/%s\n"), backend_host, _FX_helper(v_page));
+    if (wifiOk() && v_client.connect (backend_host, backend_port)) {
         resetWatchdog();
 
         // query page
-        httpHCPGET (v_client, svr_host, v_page);
+        httpHCPGET (v_client, backend_host, v_page);
 
         // skip header
         if (!httpSkipHeader (v_client)) {
@@ -131,7 +132,7 @@ bool askOTAupdate(char *new_ver)
 
     // ask whether to install
     tft.setCursor (INDENT, Q_Y);
-    sprintf (line, _FX("New version %s is available. Update now?  ... "), new_ver);
+    snprintf (line, sizeof(line), _FX("New version %s is available. Update now?  ... "), new_ver);
     tft.print (line);
     uint16_t count_x = tft.getCursorX();
     uint16_t count_y = tft.getCursorY();
@@ -141,8 +142,9 @@ bool askOTAupdate(char *new_ver)
     // draw yes/no boxes
     SBox no_b =  {INDENT, BOX_Y, BOX_W, BOX_H};
     SBox yes_b = {(uint16_t)(tft.width()-INDENT-BOX_W), BOX_Y, BOX_W, BOX_H};
-    drawStringInBox ("No", no_b, true, RA8875_WHITE);
-    drawStringInBox ("Yes", yes_b, false, RA8875_WHITE);
+    bool active_yes = false;
+    drawStringInBox ("No", no_b, !active_yes, RA8875_WHITE);
+    drawStringInBox ("Yes", yes_b, active_yes, RA8875_WHITE);
 
     // prep for potentially long wait
     closeDXCluster();           // prevent inbound msgs from clogging network
@@ -152,11 +154,11 @@ bool askOTAupdate(char *new_ver)
     WiFiClient v_client;
     uint16_t liney = INFO_Y+LH;
     selectFontStyle (LIGHT_FONT, SMALL_FONT);
-    if (wifiOk() && v_client.connect (svr_host, HTTPPORT)) {
+    if (wifiOk() && v_client.connect (backend_host, backend_port)) {
         resetWatchdog();
 
         // query page
-        httpHCPGET (v_client, svr_host, v_page);
+        httpHCPGET (v_client, backend_host, v_page);
 
         // skip header
         if (!httpSkipHeader (v_client)) {
@@ -200,6 +202,18 @@ bool askOTAupdate(char *new_ver)
             tft.print(--count_s);
         }
 
+        // switch active button if type tab or accept current if Enter or bale if esc
+        char c = tft.getChar(NULL,NULL);
+        if (c == '\t') {
+            active_yes = !active_yes;
+            drawStringInBox ("Yes", yes_b, active_yes, RA8875_WHITE);
+            drawStringInBox ("No", no_b, !active_yes, RA8875_WHITE);
+        } else if (c == 27) {
+            return (false);
+        } else if (c == '\r' || c == '\n') {
+            return (active_yes);
+        }
+
         // check buttons
         SCoord s;
         if (readCalTouchWS(s) != TT_NONE) {
@@ -230,7 +244,7 @@ void doOTAupdate(const char *newver)
     selectFontStyle (BOLD_FONT, SMALL_FONT);
     tft.setCursor (0, 100);
     tft.setTextColor (RA8875_WHITE);
-    tft.println (F("Beginning remote update..."));
+    tft.println (F("  Performing remote update..."));
     tft.println (F("  Do not interrupt power or network during this process."));
     tft.println();
 
@@ -247,14 +261,14 @@ void doOTAupdate(const char *newver)
     char url[200];
   #if defined(_IS_ESP8266)
     if (strstr(hc_version, "rc") && strstr (newver, "rc"))
-        snprintf (url, sizeof(url), _FX("http://%s/ham/HamClock/ESPHamClock-V%s.ino.bin"), svr_host, newver);
+        snprintf (url, sizeof(url), _FX("http://%s/ham/HamClock/ESPHamClock-V%s.ino.bin"), backend_host, newver);
     else
-        snprintf (url, sizeof(url), _FX("http://%s/ham/HamClock/ESPHamClock.ino.bin"), svr_host);
+        snprintf (url, sizeof(url), _FX("http://%s/ham/HamClock/ESPHamClock.ino.bin"), backend_host);
   #else
     if (strstr(hc_version, "rc") && strstr (newver, "rc"))
-        snprintf (url, sizeof(url), _FX("http://%s/ham/HamClock/ESPHamClock-V%s.zip"), svr_host, newver);
+        snprintf (url, sizeof(url), _FX("http://%s/ham/HamClock/ESPHamClock-V%s.zip"), backend_host, newver);
     else
-        snprintf (url, sizeof(url), _FX("https://%s/ham/HamClock/ESPHamClock.zip"), svr_host);
+        snprintf (url, sizeof(url), _FX("https://%s/ham/HamClock/ESPHamClock.zip"), backend_host);
   #endif
 
     // go
