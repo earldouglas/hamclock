@@ -127,6 +127,7 @@ in {
             onlySSL = false; # preferred for securitah
             forceSSL = true; # needed for acme?
             locations."/${callsign}".extraConfig = ''
+              rewrite ^/${callsign}/$ /live.html break;
               rewrite /${callsign}/(.*) /$1 break;
               proxy_pass http://localhost:8081;
             '';
