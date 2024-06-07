@@ -30,9 +30,7 @@ in {
         };
 
       hamclockWeb =
-        import hamclockWebSrc {
-          pkgs = pkgs.pkgsCross.aarch64-multiplatform;
-        };
+        import hamclockWebSrc {};
 
       callsign = builtins.getEnv "HC_CALLSIGN";
       grid = builtins.getEnv "HC_GRID";
@@ -40,17 +38,15 @@ in {
 
     in {
 
-      nixpkgs.system = "aarch64-linux";
-
       # EC2 ############################################################
       deployment = {
         targetEnv = "ec2";
         ec2 = {
           accessKeyId = accessKeyId;
           region = region;
-          instanceType = "t4g.nano";
+          instanceType = "t3a.nano";
           keyPair = resources.ec2KeyPairs.hamclock-key-pair;
-          ami = "ami-033ff64078c59f378";
+          ami = "ami-00f27b88d169080ac";
           ebsInitialRootDiskSize = 12;
           elasticIPv4 = resources.elasticIPs.hamclock-elastic-ip;
         };
