@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <time.h>
+#include <string>
 
 
 // N.B. keep showDefines() up to date
@@ -33,9 +34,7 @@
   #endif
 #endif
     
-#if defined(_IS_ESP8266)
-  #define _I2C_ESP
-#elif defined(__has_include)
+#if defined(__has_include)
   #if defined(_IS_FREEBSD) && __has_include(<dev/iicbus/iic.h>)
     #define _NATIVE_I2C_FREEBSD
   #elif defined(_IS_LINUX) && (__has_include(<linux/i2c-dev.h>) || __has_include("linux/i2c-dev.h"))
@@ -43,9 +42,7 @@
   #endif
 #endif
 
-#if defined(_IS_ESP8266)
-  #define _NATIVE_GPIO_ESP
-#elif defined(__has_include)
+#if defined(__has_include)
   #if defined(_IS_FREEBSD)
     #if __has_include(<libgpio.h>)
         #define _NATIVE_GPIO_FREEBSD
@@ -73,28 +70,45 @@
 
 // tcp ports
 #define RESTFUL_PORT    8080    
-#define LIVEWEB_PORT    8081    
+#define LIVEWEB_RW_PORT 8081    
+#define LIVEWEB_RO_PORT 8082    
 
+// character codes for tft.get/putChar(), mostly ASCII control plus a few more
+#define CHAR_BS         '\b'
+#define CHAR_TAB        '\t'
+#define CHAR_NL         '\n'
+#define CHAR_CR         '\r'
+#define CHAR_SPACE      ' '
+#define CHAR_ESC        ((char)27)
+#define CHAR_DEL        ((char)127)
+#define CHAR_LEFT       ((char)128)
+#define CHAR_DOWN       ((char)129)
+#define CHAR_UP         ((char)130)
+#define CHAR_RIGHT      ((char)131)
 
 extern void setX11FullScreen (bool);
 extern void setDemoMode(bool on);
 extern void setCenterLng (int16_t l);
 extern const char *backend_host;
 extern int backend_port;
-extern int liveweb_port;
+extern int liveweb_ro_port;
+extern int liveweb_rw_port;
+extern int liveweb_max;
+extern const int liveweb_maxmax;
 extern int restful_port;
 extern bool skip_skip;
 extern bool init_iploc;
 extern bool want_kbcursor;
-extern bool no_web_touch;
 extern const char *init_locip;
 extern int gimbal_trace_level;
 extern time_t usr_datetime;
 extern const char *getI2CFilename(void);
 extern bool GPIOOk(void);
 extern const char *hc_version;
+extern std::string our_dir;
 extern void doExit(void);
 extern bool testPassword (const char *category, const char *candidate_pw);
+extern const char *pw_file;
 
 #define N_DIAG_FILES 4
 extern const char *diag_files[N_DIAG_FILES];

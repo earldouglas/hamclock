@@ -4,7 +4,7 @@
 #include "HamClock.h"
 
 #define BORDER_COLOR    GRAY
-#define GRID_COLOR      RGB565(35,35,35)
+#define GRID_COLOR      RGB565(55,55,55)
 #define TICKLEN         2                       // length of plot tickmarks, pixels
 #define TGAP            10                      // top gap for title
 #define BGAP            15                      // bottom gap for x labels
@@ -163,9 +163,12 @@ uint16_t color, float y_min, float y_max, char *label_str)
             }
         }
 
-        // y label is title over plot
+        // y label is title over plot, beware spilling off right edge
         uint16_t tl = getTextWidth(ylabel);
-        tft.setCursor (box.x+LGAP+(box.w-LGAP-tl)/2, box.y+(TGAP-FONTH)/2+1);
+        uint16_t ttx = box.x + LGAP + (box.w-LGAP-tl)/2;
+        if (ttx + tl >= box.x + box.w)
+            ttx = box.x + box.w - tl;
+        tft.setCursor (ttx, box.y+(TGAP-FONTH)/2+1);
         tft.print (ylabel);
 
         // x labels and tickmarks just below plot
@@ -526,7 +529,7 @@ void plotBandConditions (const SBox &box, int busy, const BandCdtnMatrix *bmp, c
         uint16_t p_x = PLEFT_X + PLOT_W*p_col/PLOT_COLS;
         for (int m_col = 0; m_col < BMTRX_COLS; m_col++) {
             // get reliability
-            uint8_t rel = (*bmp)[m_row][m_col];
+            uint8_t rel = bmp->m[m_row][m_col];
 
             // choose color similar to fetchVOACAPArea.pl
             // rel:    0     10         33         66          100
@@ -535,7 +538,7 @@ void plotBandConditions (const SBox &box, int busy, const BandCdtnMatrix *bmp, c
             uint8_t h, s = 250, v;
             v = rel < 10 ? 0 : 250;
             h = rel < 33 ? 0 : (rel < 66 ? 43 : 85);
-            uint16_t color = HSV565 (h, s, v);
+            uint16_t color = HSV_2_RGB565 (h, s, v);
 
             // draw color box
             int p_row = m_col;
@@ -554,20 +557,30 @@ void plotBandConditions (const SBox &box, int busy, const BandCdtnMatrix *bmp, c
         tft.drawLine (PLEFT_X, y, PRIGHT_X, y, GRID_COLOR);
     }
 
-    // printFreeHeap (F("plotBandConditions"));
 }
 
 /* print the NOAA RSG Space Weather Scales in the given box.
+ * return whether at least the data transaction was valid.
  */
-void plotNOAASWx (const SBox &box, const NOAASpaceWx &noaaspw)
+bool plotNOAASWx (const SBox &box)
 {
     resetWatchdog();
 
     // prep
     prepPlotBox (box);
 
+    // fetch
+    NOAASpaceWxData noaa;
+    if (!retrieveNOAASWx(noaa)) {
+        plotMessage (box, RA8875_RED, "NOAA connection failed");
+        return (false);
+    } else if (!noaa.data_ok) {
+        plotMessage (box, RA8875_RED, "NOAA data invalid");
+        return (true);                                  // transaction itself was ok
+    }
+
     // title
-    tft.setTextColor(RA8875_YELLOW);
+    tft.setTextColor(NOAASPW_COLOR);
     selectFontStyle (LIGHT_FONT, SMALL_FONT);
     uint16_t h = box.h/5-2;                             // text row height
     const char *title = _FX("NOAA SpaceWx");
@@ -582,17 +595,20 @@ void plotNOAASWx (const SBox &box, const NOAASpaceWx &noaaspw)
         h += box.h/4;
         tft.setCursor (box.x+w+(i==2?-2:0), box.y+h);   // tweak G to better center
         tft.setTextColor(GRAY);
-        tft.print (noaaspw.cat[i]);
+        tft.print (noaa.cat[i]);
 
         w += box.w/10;
         for (int j = 0; j < N_NOAASW_V; j++) {
-            int val = noaaspw.val[i][j];
+            int val = noaa.val[i][j];
             w += box.w/7;
             tft.setCursor (box.x+w, box.y+h);
             tft.setTextColor(val == 0 ? RA8875_GREEN : (val <= 3 ? RA8875_YELLOW : RA8875_RED));
             tft.print (val);
         }
     }
+
+    // ok
+    return (true);
 }
 
 
@@ -654,10 +670,14 @@ void prepPlotBox (const SBox &box)
     // erase all
     fillSBox (box, RA8875_BLACK);
 
-    // not bottom so it appears to connect with map top
+    // not bottom so it appears to connect with map top...
     uint16_t rx = box.x+box.w-1;
     uint16_t by = box.y+box.h-1;
     tft.drawLine (box.x, box.y, box.x, by, BORDER_COLOR);               // left
     tft.drawLine (box.x, box.y, rx, box.y, BORDER_COLOR);               // top
     tft.drawLine (rx, box.y, rx, by, BORDER_COLOR);                     // right
+
+    // ... unless showing de/dx pane
+    if (memcmp (&box, &plot_b[PANE_0], sizeof(SBox)) == 0)
+        tft.drawLine (box.x, by, rx, by, BORDER_COLOR);                 // bottom
 }

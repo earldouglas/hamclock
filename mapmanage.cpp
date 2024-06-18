@@ -1,16 +1,26 @@
 /* this file manages the background maps, both static styles and VOACAP area propagation.
  *
- * On ESP:
- *    maps are stored in a LittleFS file system, pixels accessed with file.seek and file.read with a cache
- * On all desktops:
- *    maps are stored in $HOME/.hamclock, pixels accessed with mmap
- *
  * all map files are RGB565 BMP V4 format.
  */
 
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+
+
 #include "HamClock.h"
 
+// persistent state of open files, allows restarting
+static File day_file, night_file;                       // open LittleFS file handles
+static int day_fbytes, night_fbytes;                    // bytes mmap'ed
+static char *day_pixels, *night_pixels;                 // pixels mmap'ed
 
 
 // BMP file format parameters
@@ -38,358 +48,36 @@ const char *coremap_names[CM_N] = {
 
 // prop and muf style names
 static const char prop_style[] = "PropMap";
-static const char muf_style[] = "MUFMap";
+static const char muf_v_style[] = "MUFMap";
+
+// handy zoomed w and h
+#define ZOOM_W  (HC_MAP_W*pan_zoom.zoom)
+#define ZOOM_H  (HC_MAP_H*pan_zoom.zoom)
 
 
-#if defined(_IS_ESP8266)
-
-/***********************************************************************************************
- *
- * Only on ESP
- *
- ***********************************************************************************************/
-
-/* LittleFS seek+read performance: read_ms = 88 + 0.23/byte
- * Thus longer caches help mercator but greatly slow azimuthal due to cache misses. Whole row is
- * a huge loss for azimuthal.
+/* marshall the day and night file names and display titles for the given style.
+ * N.B. we do not check for suffient room in the arrays
+ * N.B. CM_DRAP name adds -S for no-scale version as of HamClock V2.67
+ * N.B. CM_WX name depends on useMetricUnits()
+ * N.B. file names are not for query files on UNIX
  */
-
-// persistant state
-#define N_CACHE_COLS     50                             // n read-ahead columns to cache
-static File day_file, night_file;                       // open LittleFS file handles
-static uint8_t *day_row_cache, *night_row_cache;        // row caches
-static uint16_t day_cache_row, night_cache_row;         // which starting rows
-static uint16_t day_cache_col, night_cache_col;         // which starting cols
-
-
-/* return day RGB565 pixel at the given location.
- * ESP only
- */
-bool getMapDayPixel (uint16_t row, uint16_t col, uint16_t *dayp)
+static void buildMapNames (const char *style, char *dfile, char *nfile, char *dtitle, char *ntitle)
 {
-        // beware no map
-        if (!day_row_cache) {
-            *dayp = 0;
-            return (false);
-        }
-
-        // report cache miss stats occasionally
-        static int n_query, cache_miss;
-        if (++n_query == 1000) {
-            // Serial.printf ("day cache miss   %4d/%4d\n", cache_miss, n_query);
-            cache_miss = n_query = 0;
-        }
-
-        if (row >= HC_MAP_H || col >= HC_MAP_W) {
-            Serial.printf (_FX("%s: day %d %d out of bounds %dx%d\n"), row, col, HC_MAP_W, HC_MAP_H);
-            return (false);
-        }
-
-        // update cache if miss
-        if (row != day_cache_row || col < day_cache_col || col >= day_cache_col+N_CACHE_COLS) {
-            cache_miss++;
-            resetWatchdog();
-            if (!day_file.seek (BHDRSZ + (row*HC_MAP_W+col)*BPERBMPPIX, SeekSet)
-                        || !day_file.read (day_row_cache, BPERBMPPIX*N_CACHE_COLS)) {
-                Serial.printf (_FX("day pixel read err at %d x %d\n"), row, col);
-                return (false);
-            }
-            day_cache_row = row;
-            day_cache_col = col;
-        }
-
-        // return value from cache
-        int idx0 = (col-day_cache_col)*BPERBMPPIX;
-        *dayp = *(uint16_t*)(&day_row_cache[idx0]);
-
-        // ok
-        return (true);
-}
-
-
-/* return night RGB565 pixel at the given location.
- * ESP only
- */
-bool getMapNightPixel (uint16_t row, uint16_t col, uint16_t *nightp)
-{
-        // beware no map
-        if (!night_row_cache) {
-            *nightp = 0;
-            return (false);
-        }
-
-        // report cache miss stats occasionally
-        static int n_query, cache_miss;
-        if (++n_query == 1000) {
-            // Serial.printf ("night cache miss   %4d/%4d\n", cache_miss, n_query);
-            cache_miss = n_query = 0;
-        }
-
-        if (row >= HC_MAP_H || col >= HC_MAP_W) {
-            Serial.printf (_FX("%s: night %d %d out of bounds %dx%d\n"), row, col, HC_MAP_W, HC_MAP_H);
-            return (false);
-        }
-
-        // update cache if miss
-        if (row != night_cache_row || col < night_cache_col || col >= night_cache_col+N_CACHE_COLS) {
-            cache_miss++;
-            resetWatchdog();
-            if (!night_file.seek (BHDRSZ + (row*HC_MAP_W+col)*BPERBMPPIX, SeekSet)
-                        || !night_file.read (night_row_cache, BPERBMPPIX*N_CACHE_COLS)) {
-                Serial.printf (_FX("night pixel read err at %d x %d\n"), row, col);
-                return (false);
-            }
-            night_cache_row = row;
-            night_cache_col = col;
-        }
-
-        // return value from cache
-        int idx0 = (col-night_cache_col)*BPERBMPPIX;
-        *nightp = *(uint16_t*)(&night_row_cache[idx0]);
-
-        // ok
-        return (true);
-}
-
-/* invalidate pixel connection until proven good again
- * ESP only
- */
-static void invalidatePixels()
-{
-        if (day_row_cache) {
-            free (day_row_cache);
-            day_row_cache = NULL;
-        }
-        if (night_row_cache) {
-            free (night_row_cache);
-            night_row_cache = NULL;
-        }
-}
-
-/* prepare open day_file and night_file for pixel access.
- * if trouble close both and return false, else return true.
- * ESP only
- */
-static bool installFilePixels (const char *dfile, const char *nfile)
-{
-        // check files are indeed open
-        if (!day_file || !night_file) {
-
-            // note and close the open file(s)
-            if (day_file)
-                day_file.close();
-            else
-                Serial.printf (_FX("%s not open\n"), dfile);
-            if (night_file)
-                night_file.close();
-            else
-                Serial.printf (_FX("%s not open\n"), nfile);
-
-            // bad
-            return (false);
-        }
-
-        // init row caches for getMapDay/NightPixel()
-        day_row_cache = (uint8_t *) realloc (day_row_cache, BPERBMPPIX*N_CACHE_COLS);
-        night_row_cache = (uint8_t *) realloc (night_row_cache, BPERBMPPIX*N_CACHE_COLS);
-        if (!day_row_cache || !night_row_cache)
-            fatalError ("pixel cache %p %p", day_row_cache, night_row_cache);   // no _FX if alloc failing
-        day_cache_col = day_cache_row = ~0;     // mark as invalid
-        night_cache_col = night_cache_row = ~0;
-
-        // ok!
-        return (true);
-}
-
-/* qsort-style compare two FS_Info by UNIX time
- * ESP only
- */
-static int FSInfoTimeQsort (const void *p1, const void *p2)
-{
-        time_t t1 = ((FS_Info *)p1)->t0;
-        time_t t2 = ((FS_Info *)p2)->t0;
-
-        if (t1 < t2)
-            return (-1);
-        if (t1 > t2)
-            return (1);
-        return(0);
-}
-
-/* ESP FLASH can only hold 4 map files, remove some if necessary to make room for specied number.
- * ESP only
- */
-static void cleanFLASH (const char *title, int need_files)
-{
-        resetWatchdog();
-
-        // max number of existing files allowable
-        int max_ok = 4 - need_files;
-
-        // get info on existing files
-        uint64_t fs_size, fs_used;
-        char *fs_name;
-        int n_files;
-        FS_Info *fsi = getConfigDirInfo (&n_files, &fs_name, &fs_size, &fs_used);
-
-        // always remove muf map because it is always refreshed
-        for (int i = 0; i < n_files; i++) {
-            FS_Info *fip = &fsi[i];
-            if (strstr(fip->name, muf_style)) {
-                Serial.printf (_FX("%s: rm %s\n"), title, fip->name);
-                LittleFS.remove (fip->name);
-            }
-        }
-
-        // recheck
-        free (fs_name);
-        free (fsi);
-        fsi = getConfigDirInfo (&n_files, &fs_name, &fs_size, &fs_used);
-        if (n_files > max_ok) {
-
-            // still too many. sort by time, oldest first
-            qsort (fsi, n_files, sizeof(*fsi), FSInfoTimeQsort);
-
-            // remove oldest until enough room
-            for (int i = 0; i < n_files && n_files-i > max_ok; i++) {
-                FS_Info *fip = &fsi[i];
-                Serial.printf (_FX("%s: rm %s\n"), title, fip->name);
-                LittleFS.remove (fip->name);
-            }
-
-        }
-
-        // should be ok
-        free (fs_name);
-        free (fsi);
-}
-
-
-#else   // !_IS_ESP8266
-
-
-
-/***********************************************************************************************
- *
- * only on UNIX
- *
- ***********************************************************************************************/
-
-
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <dirent.h>
-#include <unistd.h>
-#include <errno.h>
-#include <time.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-
-
-// persistent state of open files, allows restarting
-static File day_file, night_file;                       // open LittleFS file handles
-static int day_fbytes, night_fbytes;                    // bytes mmap'ed
-static char *day_pixels, *night_pixels;                 // pixels mmap'ed
-
-
-// dummies for linking
-bool getMapDayPixel (uint16_t row, uint16_t col, uint16_t *nightp) { return (false); }
-bool getMapNightPixel (uint16_t row, uint16_t col, uint16_t *nightp) { return (false); }
-static void cleanFLASH (const char *title, int n) {}
-
-
-/* invalidate pixel connection until proven good again
- * UNIX only
- */
-static void invalidatePixels()
-{
-        // disconnect from tft thread
-        tft.setEarthPix (NULL, NULL);
-
-        // unmap pixel arrays
-        if (day_pixels) {
-            munmap (day_pixels, day_fbytes);
-            day_pixels = NULL;
-        }
-        if (night_pixels) {
-            munmap (night_pixels, day_fbytes);
-            night_pixels = NULL;
-        }
-}
-
-/* prepare open day_file and night_file for pixel access.
- * return whether ok
- * UNIX only
- */
-static bool installFilePixels (const char *dfile, const char *nfile)
-{
-        bool ok = false;
-
-        // mmap pixels if both files are open
-        if (day_file && night_file) {
-
-            day_fbytes = BHDRSZ + HC_MAP_W*HC_MAP_H*2;          // n bytes of 16 bit RGB565 pixels
-            night_fbytes = BHDRSZ + HC_MAP_W*HC_MAP_H*2;
-            day_pixels = (char *)                               // allow OS to choose addrs
-                    mmap (NULL, day_fbytes, PROT_READ, MAP_PRIVATE, day_file.fileno(), 0);
-            night_pixels = (char *)
-                    mmap (NULL, night_fbytes, PROT_READ, MAP_PRIVATE, night_file.fileno(), 0);
-
-            ok = day_pixels != MAP_FAILED && night_pixels != MAP_FAILED;
-        }
-
-        // install pixels if ok
-        if (ok) {
-
-            // Serial.println (F("both mmaps good"));
-
-            // don't need files open once mmap has been established
-            day_file.close();
-            night_file.close();;
-
-            // install in tft at start of pixels
-            tft.setEarthPix (day_pixels+BHDRSZ, night_pixels+BHDRSZ);
-
+        if (strcmp (style, "DRAP") == 0) {
+            snprintf (dfile, 32, _FX("/map-D-%dx%d-DRAP-S.bmp"), ZOOM_W, ZOOM_H);
+            snprintf (nfile, 32, _FX("/map-N-%dx%d-DRAP-S.bmp"), ZOOM_W, ZOOM_H);
+        } else if (strcmp (style, "Weather") == 0) {
+            const char *units = useMetricUnits() ? "mB" : "in";
+            snprintf (dfile, 32, _FX("/map-D-%dx%d-Wx-%s.bmp"), ZOOM_W, ZOOM_H, units);
+            snprintf (nfile, 32, _FX("/map-N-%dx%d-Wx-%s.bmp"), ZOOM_W, ZOOM_H, units);
         } else {
-
-            // no go -- clean up
-
-            if (day_file)
-                day_file.close();
-            else
-                Serial.printf (_FX("%s not open\n"), dfile);
-            if (day_pixels == MAP_FAILED)
-                Serial.printf (_FX("%s mmap failed: %s\n"), dfile, strerror(errno));
-            else if (day_pixels)
-                munmap (day_pixels, day_fbytes);
-            day_pixels = NULL;
-
-            if (night_file)
-                night_file.close();
-            else
-                Serial.printf (_FX("%s not open\n"), nfile);
-            if (night_pixels == MAP_FAILED)
-                Serial.printf (_FX("%s mmap failed: %s\n"), nfile, strerror(errno));
-            else if (night_pixels)
-                munmap (night_pixels, night_fbytes);
-            night_pixels = NULL;
-
+            snprintf (dfile, 32, _FX("/map-D-%dx%d-%s.bmp"), ZOOM_W, ZOOM_H, style);
+            snprintf (nfile, 32, _FX("/map-N-%dx%d-%s.bmp"), ZOOM_W, ZOOM_H, style);
         }
 
-        return (ok);
+        snprintf (dtitle, NV_COREMAPSTYLE_LEN+10, _FX("%s D map"), style);
+        snprintf (ntitle, NV_COREMAPSTYLE_LEN+10, _FX("%s N map"), style);
 }
-
-#endif // _IS_ESP8266
-
-
-
-/***********************************************************************************************
- *
- * remaining functions are common to both architectures
- *
- ***********************************************************************************************/
 
 
 
@@ -436,39 +124,6 @@ static bool bmpHdrOk (char *buf, uint32_t w, uint32_t h, uint32_t *filesizep)
         return (true);
 }
 
-
-/* marshall the day and night file names and titles for the given style.
- * N.B. we do not check for suffient room in the arrays
- * N.B. CM_DRAP name adds -S for no-scale version as of HamClock V2.67
- * N.B. CM_WX name depends on useMetricUnits()
- */
-static void buildMapNames (const char *style, char *dfile, char *nfile, char *dtitle, char *ntitle)
-{
-        if (strcmp (style, "DRAP") == 0) {
-            snprintf (dfile, 32, _FX("/map-D-%dx%d-DRAP-S.bmp"), HC_MAP_W, HC_MAP_H);
-            snprintf (nfile, 32, _FX("/map-N-%dx%d-DRAP-S.bmp"), HC_MAP_W, HC_MAP_H);
-        } else if (strcmp (style, "Weather") == 0) {
-            const char *units = useMetricUnits() ? "mB" : "in";
-            snprintf (dfile, 32, _FX("/map-D-%dx%d-Weather-%s.bmp"), HC_MAP_W, HC_MAP_H, units);
-            snprintf (nfile, 32, _FX("/map-N-%dx%d-Weather-%s.bmp"), HC_MAP_W, HC_MAP_H, units);
-        } else {
-            snprintf (dfile, 32, _FX("/map-D-%dx%d-%s.bmp"), HC_MAP_W, HC_MAP_H, style);
-            snprintf (nfile, 32, _FX("/map-N-%dx%d-%s.bmp"), HC_MAP_W, HC_MAP_H, style);
-        }
-
-        snprintf (dtitle, NV_COREMAPSTYLE_LEN+10, _FX("%s D map"), style);
-        snprintf (ntitle, NV_COREMAPSTYLE_LEN+10, _FX("%s N map"), style);
-}
-
-/* qsort-style compare two FS_Info by name
- */
-static int FSInfoNameQsort (const void *p1, const void *p2)
-{
-        return (strcmp (((FS_Info *)p1)->name, ((FS_Info *)p2)->name));
-}
-
-
-
 /* download the given file of expected size and load into LittleFS.
  * client is already postioned at first byte of image.
  */
@@ -481,7 +136,7 @@ static bool downloadMapFile (WiFiClient &client, const char *file, const char *t
 
         // alloc copy buffer
         #define COPY_BUF_SIZE 1024                      // > BHDRSZ but beware RAM pressure
-        const uint32_t npixbytes = HC_MAP_W*HC_MAP_H*BPERBMPPIX;
+        const uint32_t npixbytes = ZOOM_W*ZOOM_H*BPERBMPPIX;
         uint32_t nbufbytes = 0;
         StackMalloc buf_mem(COPY_BUF_SIZE);
         char *copy_buf = (char *) buf_mem.getMem();
@@ -495,15 +150,8 @@ static bool downloadMapFile (WiFiClient &client, const char *file, const char *t
         }
         f = LittleFS.open (file, "w");
         if (!f) {
-            #if defined(_IS_ESP8266)
-                // using fatalError would probably leave user stranded in what is likely a persistent err
-                mapMsg (true, 1000, _FX("%s: create failed"), title);
-                return (false);
-            #else
-                // use non-standard File members for richer error msg
-                fatalError (_FX("Error creating required file:\n%s\n%s"), f.fpath.c_str(), f.errstr.c_str());
-                // never returns
-            #endif
+            fatalError (_FX("Error creating required file:\n%s\n%s"), f.fpath.c_str(), f.errstr.c_str());
+            // never returns
         }
 
         // read and check remote header
@@ -515,7 +163,7 @@ static bool downloadMapFile (WiFiClient &client, const char *file, const char *t
             }
         }
         uint32_t filesize;
-        if (!bmpHdrOk (copy_buf, HC_MAP_W, HC_MAP_H, &filesize)) {
+        if (!bmpHdrOk (copy_buf, ZOOM_W, ZOOM_H, &filesize)) {
             Serial.printf (_FX("bad header: %.*s\n"), BHDRSZ, copy_buf); // might be err message
             mapMsg (true, 1000, _FX("%s: bad header"), title);
             goto out;
@@ -532,12 +180,19 @@ static bool downloadMapFile (WiFiClient &client, const char *file, const char *t
 
         // copy pixels
         {   // statement block just to avoid complaint about goto bypassing t0
-            mapMsg (false, 100, _FX("%s: downloading"), title);
+            Serial.printf (_FX("saving %s\n"), file);
+            bool want_msg = ZOOM_W >= 2640;              // only for the largish files
+            mapMsg (want_msg, 100, _FX("%s: downloading"), title);
             uint32_t t0 = millis();
             for (uint32_t nbytescopy = 0; nbytescopy < npixbytes; nbytescopy++) {
 
-                if (((nbytescopy%(npixbytes/10)) == 0) || nbytescopy == npixbytes-1)
-                    mapMsg (false, 0, _FX("%s: %3d%%"), title, 100*(nbytescopy+1)/npixbytes);
+                if (((nbytescopy%(npixbytes/10)) == 0) || nbytescopy == npixbytes-1) {
+                    if (pan_zoom.zoom > MIN_ZOOM)
+                        mapMsg (want_msg, 0, _FX("%s %dx: %3d%%"), title, pan_zoom.zoom,
+                                                                100*(nbytescopy+1)/npixbytes);
+                    else
+                        mapMsg (want_msg, 0, _FX("%s: %3d%%"), title, 100*(nbytescopy+1)/npixbytes);
+                }
 
                 // read more
                 if (nbufbytes < COPY_BUF_SIZE && !getTCPChar (client, &copy_buf[nbufbytes++])) {
@@ -551,7 +206,7 @@ static bool downloadMapFile (WiFiClient &client, const char *file, const char *t
                     resetWatchdog();
                     updateClocks(false);
                     if (f.write (copy_buf, nbufbytes) != nbufbytes) {
-                        mapMsg (true, 1000, _FX("%s: write failed"), title);
+                        mapMsg (true, 1000, _FX("%s: copy failed"), title);
                         goto out;
                     }
                     nbufbytes = 0;
@@ -571,6 +226,241 @@ static bool downloadMapFile (WiFiClient &client, const char *file, const char *t
 
         return (ok);
 }
+
+
+/* invalidate pixel connection until proven good again
+ */
+static void invalidatePixels()
+{
+        // disconnect from tft thread
+        tft.setEarthPix (NULL, NULL, 0, 0);
+
+        // unmap pixel arrays
+        if (day_pixels) {
+            munmap (day_pixels, day_fbytes);
+            day_pixels = NULL;
+        }
+        if (night_pixels) {
+            munmap (night_pixels, day_fbytes);
+            night_pixels = NULL;
+        }
+}
+
+/* prepare open day_file and night_file for pixel access.
+ * return whether ok
+ */
+static bool installFilePixels (const char *dfile, const char *nfile)
+{
+        bool ok = false;
+
+        // mmap pixels if both files are open
+        if (day_file && night_file) {
+
+            day_fbytes = BHDRSZ + ZOOM_W*ZOOM_H*2;          // n bytes of 16 bit RGB565 pixels
+            night_fbytes = BHDRSZ + ZOOM_W*ZOOM_H*2;
+            day_pixels = (char *)                               // allow OS to choose addrs
+                    mmap (NULL, day_fbytes, PROT_READ, MAP_PRIVATE, day_file.fileno(), 0);
+            night_pixels = (char *)
+                    mmap (NULL, night_fbytes, PROT_READ, MAP_PRIVATE, night_file.fileno(), 0);
+
+            ok = day_pixels != MAP_FAILED && night_pixels != MAP_FAILED;
+        }
+
+        // install pixels if ok
+        if (ok) {
+
+            // Serial.println (F("both mmaps good"));
+
+            // don't need files open once mmap has been established
+            day_file.close();
+            night_file.close();;
+
+            // install in tft at start of pixels
+            tft.setEarthPix (day_pixels+BHDRSZ, night_pixels+BHDRSZ, ZOOM_W, ZOOM_H);
+
+        } else {
+
+            // no go -- clean up
+
+            if (day_file)
+                day_file.close();
+            else
+                Serial.printf (_FX("%s not open\n"), dfile);
+            if (day_pixels == MAP_FAILED)
+                Serial.printf (_FX("%s mmap failed: %s\n"), dfile, strerror(errno));
+            else if (day_pixels)
+                munmap (day_pixels, day_fbytes);
+            day_pixels = NULL;
+
+            if (night_file)
+                night_file.close();
+            else
+                Serial.printf (_FX("%s not open\n"), nfile);
+            if (night_pixels == MAP_FAILED)
+                Serial.printf (_FX("%s mmap failed: %s\n"), nfile, strerror(errno));
+            else if (night_pixels)
+                munmap (night_pixels, night_fbytes);
+            night_pixels = NULL;
+
+        }
+
+        return (ok);
+}
+
+/* clean up old files for the given style.
+ */
+static void cleanupMaps (const char *style)
+{
+        // open our working directory
+        DIR *dirp = opendir (our_dir.c_str());
+        if (dirp == NULL) {
+            Serial.printf ("RM: %s: %s\n", our_dir.c_str(), strerror(errno));
+            return;
+        }
+
+        Serial.printf ("RM: cleaning style %s\n", style);
+
+        // malloced list of malloced names to be removed (so we don't modify dir while scanning)
+        typedef struct {
+            char *fn;                                   // malloced file name
+            int age;                                    // age, seconds
+        } RMFile;
+        RMFile *rm_files = NULL;                        // malloced list
+        int n_rm = 0;                                   // n in list
+
+        // scan for style files at least a day old
+        const int max_age = 3600*24;
+        time_t now = myNow();
+        struct dirent *dp;
+        while ((dp = readdir(dirp)) != NULL) {
+            if (strstr (dp->d_name, style)) {
+                // file name matches now check age
+                char fpath[10000];
+                struct stat sbuf;
+                snprintf (fpath, sizeof(fpath), "%s/%s", our_dir.c_str(), dp->d_name);
+                if (stat (fpath, &sbuf) < 0)
+                    Serial.printf ("RM: %s: %s\n", fpath, strerror(errno));
+                else {
+                    int age = now - sbuf.st_mtime;      // last modified time
+                    if (age > max_age) {
+                        // add to list to be removed
+                        rm_files = (RMFile *) realloc (rm_files, (n_rm+1)*sizeof(RMFile));
+                        rm_files[n_rm].fn = strdup (fpath);
+                        rm_files[n_rm].age = age;
+                        n_rm++;
+                    }
+                }
+            }
+        }
+        closedir (dirp);
+
+        // rm files and clean up rm_files along the way
+        for (int i = 0; i < n_rm; i++) {
+            char *fn = rm_files[i].fn;
+            Serial.printf ("RM: %6.1f days old %s\n", rm_files[i].age/(3600.0F*24.0F), fn);
+            if (unlink (fn) < 0)
+                Serial.printf ("RM: unlink(%s): %s\n", fn, strerror(errno));
+            free (fn);
+        }
+        free (rm_files);
+}
+
+/* install maps that require a query unless file with same query already exists.
+ * page is the fetch*.pl CGI handler, we add the query here based on current circumstances.
+ * return whether ok
+ */
+static bool installQueryMaps (const char *page, const char *msg, const char *style, const float MHz)
+{
+        resetWatchdog();
+
+        // get clock time
+        time_t t = nowWO();
+        int yr = year(t);
+        int mo = month(t);
+        int hr = hour(t);
+
+        // prepare query
+        char query[200];
+        snprintf (query, sizeof(query),
+            _FX("YEAR=%d&MONTH=%d&UTC=%d&TXLAT=%.3f&TXLNG=%.3f&PATH=%d&WATTS=%d&WIDTH=%d&HEIGHT=%d&MHZ=%.2f&TOA=%.1f&MODE=%d&TOA=%.1f"),
+            yr, mo, hr, de_ll.lat_d, de_ll.lng_d, show_lp, bc_power, ZOOM_W, ZOOM_H,
+            MHz, bc_toa, bc_modevalue, bc_toa);
+
+        // Serial.printf (_FX("%s query: %s\n"), style, query);
+
+        // assign a style and compose names and titles
+        char dfile[32];                                                         // not used
+        char nfile[32];                                                         // not used
+        char dtitle[NV_COREMAPSTYLE_LEN+10];
+        char ntitle[NV_COREMAPSTYLE_LEN+10];
+        buildMapNames (style, dfile, nfile, dtitle, ntitle);
+
+        // insure fresh start
+        invalidatePixels();
+        cleanupMaps(style);
+
+        // by storing the entire query in the file name we easily know if a new download is needed.
+        // N.B. this violates the maximum file name limit in the real LitteFS
+
+        // create file names containing query
+        char q_dfn[200];
+        char q_nfn[200];
+        snprintf (q_dfn, sizeof(q_dfn), "map-D-%s-%s-%010u.bmp", style, page, stringHash(query));
+        snprintf (q_nfn, sizeof(q_nfn), "map-N-%s-%s-%010u.bmp", style, page, stringHash(query));
+
+        // check if both exist
+        bool ok = false;
+        File d_f = LittleFS.open (q_dfn, "r");
+        if (d_f) {
+            d_f.close();
+            File n_f = LittleFS.open (q_nfn, "r");
+            if (n_f) {
+                n_f.close();
+                ok = true;
+                Serial.printf ("%s: D and N files already downlaoded\n", style);
+            }
+        }
+
+        // if not, download both
+        if (!ok) {
+
+            // download new voacap maps
+            updateClocks(false);
+            WiFiClient client;
+            if (wifiOk() && client.connect(backend_host, backend_port)) {
+                mapMsg (true, 0, _FX("%s"), msg);
+                char full_page[300];
+                snprintf (full_page, sizeof(full_page), "/%s?%s", page, query);
+                Serial.printf (_FX("downloading %s\n"), full_page);
+                httpHCGET (client, backend_host, full_page);
+                ok = httpSkipHeader (client) && downloadMapFile (client, q_dfn, dtitle)
+                                             && downloadMapFile (client, q_nfn, ntitle);
+                client.stop();
+            }
+        }
+
+        // install if ok
+        if (ok) {
+            day_file = LittleFS.open (q_dfn, "r");
+            night_file = LittleFS.open (q_nfn, "r");
+            ok = installFilePixels (q_dfn, q_nfn);
+        }
+
+        if (!ok)
+            Serial.printf (_FX("%s: fail\n"), style);
+
+        return (ok);
+}
+
+
+
+/* qsort-style compare two FS_Info by name
+ */
+static int FSInfoNameQsort (const void *p1, const void *p2)
+{
+        return (strcmp (((FS_Info *)p1)->name, ((FS_Info *)p2)->name));
+}
+
 
 /* crack Last-Modified: Tue, 29 Sep 2020 22:55:02
  * return whether parsing was successful.
@@ -658,7 +548,7 @@ static File openMapFile (bool *downloaded, const char *file, const char *title)
         }
 
         // check flash file type and size
-        if (!bmpHdrOk (hdr_buf, HC_MAP_W, HC_MAP_H, &filesize)) {
+        if (!bmpHdrOk (hdr_buf, ZOOM_W, ZOOM_H, &filesize)) {
             mapMsg (true, 1000, _FX("%s: bad format"), title);
             goto out;
         }
@@ -681,9 +571,6 @@ static File openMapFile (bool *downloaded, const char *file, const char *title)
                 LittleFS.remove(file);
             }
 
-            // insure room
-            cleanFLASH (title, 1);
-
             // download and open again if success
             if (downloadMapFile (client, file, title)) {
                 *downloaded = true;
@@ -698,64 +585,6 @@ static File openMapFile (bool *downloaded, const char *file, const char *title)
         return (f);
 }
 
-/* install maps that require a fresh query and thus always a fresh download.
- * return whether ok
- */
-static bool installQueryMaps (const char *page, const char *style, const float MHz)
-{
-        resetWatchdog();
-
-        // get clock time
-        time_t t = nowWO();
-        int yr = year(t);
-        int mo = month(t);
-        int hr = hour(t);
-
-        // prepare query
-        StackMalloc query_mem(300);
-        char *query = (char *) query_mem.getMem();
-        snprintf (query, query_mem.getSize(),
-            _FX("%s?YEAR=%d&MONTH=%d&UTC=%d&TXLAT=%.3f&TXLNG=%.3f&PATH=%d&WATTS=%d&WIDTH=%d&HEIGHT=%d&MHZ=%.2f&TOA=%.1f&MODE=%d&TOA=%.1f"),
-            page, yr, mo, hr, de_ll.lat_d, de_ll.lng_d, show_lp, bc_power, HC_MAP_W, HC_MAP_H,
-            MHz, bc_toa, bc_modevalue, bc_toa);
-
-        Serial.printf (_FX("%s query: %s\n"), style, query);
-
-        // assign a style and compose names and titles
-        char dfile[32];                 // match LFS_NAME_MAX
-        char nfile[32];
-        char dtitle[NV_COREMAPSTYLE_LEN+10];
-        char ntitle[NV_COREMAPSTYLE_LEN+10];
-        buildMapNames (style, dfile, nfile, dtitle, ntitle);
-
-        // insure fresh start
-        cleanFLASH (dtitle, 2);
-        invalidatePixels();
-
-        // download new voacap maps
-        updateClocks(false);
-        WiFiClient client;
-        bool ok = false;
-        if (wifiOk() && client.connect(backend_host, backend_port)) {
-            httpHCGET (client, backend_host, query);
-            ok = httpSkipHeader (client) && downloadMapFile (client, dfile, dtitle)
-                                         && downloadMapFile (client, nfile, ntitle);
-            client.stop();
-        }
-
-        // install if ok
-        if (ok) {
-            day_file = LittleFS.open (dfile, "r");
-            night_file = LittleFS.open (nfile, "r");
-            ok = installFilePixels (dfile, nfile);
-        }
-
-        if (!ok)
-            Serial.printf (_FX("%s: fail\n"), style);
-
-        return (ok);
-}
-
 /* install maps for core_map that are just files maintained on the server, no update query required.
  * Download only if absent or newer on server.
  * return whether ok
@@ -766,7 +595,7 @@ static bool installFileMaps()
 
         // confirm core_map is one of the file styles
         if (core_map != CM_COUNTRIES && core_map != CM_TERRAIN && core_map != CM_DRAP
-                            && core_map != CM_AURORA && core_map != CM_WX)
+                            && core_map != CM_AURORA && core_map != CM_WX && core_map != CM_MUF_RT)
             fatalError (_FX("style not a file map %d"), core_map);        // does not return
 
         // create names and titles
@@ -777,7 +606,7 @@ static bool installFileMaps()
         char ntitle[NV_COREMAPSTYLE_LEN+10];
         buildMapNames (style, dfile, nfile, dtitle, ntitle);
 
-        // close any previous
+        // insure fresh start
         invalidatePixels();
         if (day_file)
             day_file.close();
@@ -809,8 +638,9 @@ static bool installFileMaps()
  */
 static bool installMUFMaps()
 {
-        mapMsg (true, 0, _FX("Calculating %s..."), muf_style);
-        return (installQueryMaps (_FX("/fetchVOACAP-MUF.pl"), muf_style, 0));
+        char msg[100];
+        snprintf (msg, sizeof(msg), _FX("Calculating %s..."), muf_v_style);
+        return (installQueryMaps (_FX("fetchVOACAP-MUF.pl"), msg, muf_v_style, 0));
 }
 
 /* retrieve and install VOACAP maps for the current time and given band.
@@ -819,12 +649,15 @@ static bool installMUFMaps()
 static bool installPropMaps (void)
 {
         char s[NV_COREMAPSTYLE_LEN];
-        mapMsg (true, 0, _FX("Calculating %s %s..."), getMapStyle(s), prop_style);
+        char msg[100];
+        snprintf (msg, sizeof(msg), _FX("Calculating %s %s..."), getMapStyle(s), prop_style);
+
         float MHz = propMap2MHz(prop_map.band);
+
         if (prop_map.type == PROPTYPE_REL)
-            return (installQueryMaps (_FX("/fetchVOACAPArea.pl"), prop_style, MHz));
+            return (installQueryMaps (_FX("fetchVOACAPArea.pl"), msg, prop_style, MHz));
         else if (prop_map.type == PROPTYPE_TOA)
-            return (installQueryMaps (_FX("/fetchVOACAP-TOA.pl"), prop_style, MHz));
+            return (installQueryMaps (_FX("fetchVOACAP-TOA.pl"), msg, prop_style, MHz));
         else
             fatalError (_FX("unknow prop map type %d"), prop_map.type);
         return (false);
@@ -832,20 +665,28 @@ static bool installPropMaps (void)
 
 /* install fresh maps depending on prop_map and core_map.
  * return whether ok
+ * N.B. drain pending clicks that may have accumulated during slow downloads.
  */
 bool installFreshMaps()
 {
-        if (prop_map.active)
-            return (installPropMaps());
+        bool ok = false;
 
-        bool core_ok = false;
-        if (core_map == CM_MUF)
-            core_ok = installMUFMaps();
-        else
-            core_ok = installFileMaps();
-        if (core_ok)
-            NVWriteString (NV_COREMAPSTYLE, coremap_names[core_map]);
-        return (core_ok);
+        if (prop_map.active)
+            ok = installPropMaps();
+        else {
+            bool core_ok = false;
+            if (core_map == CM_MUF_V)
+                core_ok = installMUFMaps();
+            else
+                core_ok = installFileMaps();
+            if (core_ok)
+                NVWriteString (NV_COREMAPSTYLE, coremap_names[core_map]);
+            ok = core_ok;
+        }
+
+        drainTouch();
+
+        return (ok);
 }
 
 /* init core_map from NV, or set a default, and always disable prop_map.
@@ -999,7 +840,11 @@ int propMap2Band (PropMapBand band)
 bool mapScaleIsUp(void)
 {
     return (prop_map.active
-                || core_map == CM_DRAP || core_map == CM_MUF || core_map == CM_AURORA || core_map == CM_WX);
+                || core_map == CM_DRAP
+                || core_map == CM_MUF_V
+                || core_map == CM_MUF_RT
+                || core_map == CM_AURORA
+                || core_map == CM_WX);
 }
 
 /* draw the appropriate scale at mapscale_b depending on core_map or prop_map, if any.
@@ -1007,14 +852,14 @@ bool mapScaleIsUp(void)
  */
 void drawMapScale()
 {
-    // color scale. values must be monitonivally increasing.
+    // color scale. values must be monotonically increasing.
     typedef struct {
         float value;                                    // world value
         uint32_t color;                                 // 24 bit RGB scale color
         bool black_text;                                // black text, else white
     } MapScalePoint;
 
-    // CM_DRAP and CM_MUF
+    // CM_DRAP and CM_MUF_V and CM_MUF_RT
     static PROGMEM const MapScalePoint d_scale[] = {    // see fetchDRAP.pl and fetchVOACAP-MUF.pl
         {0,  0x000000, 0},
         {4,  0x4E138A, 0},
@@ -1095,7 +940,8 @@ void drawMapScale()
     } else {
 
         switch (core_map) {
-        case CM_MUF:        // fallthru
+        case CM_MUF_V:          // fallthru
+        case CM_MUF_RT:         // fallthru
         case CM_DRAP:
             msp = d_scale;
             n_scale = NARRAY(d_scale);
@@ -1116,7 +962,7 @@ void drawMapScale()
             break;
         case CM_COUNTRIES:
         case CM_TERRAIN:
-        case CM_N:                                      // lint
+        case CM_N:                                              // lint
             // no scale
             return;
         }
@@ -1125,20 +971,20 @@ void drawMapScale()
 
     resetWatchdog();
 
-    // handy accessors for ESP
-    #define _MS_PTV(i) pgm_read_float(&msp[i].value)            // handy access to msp[i].value
-    #define _MS_PTC(i) pgm_read_dword(&msp[i].color)            // handy access to msp[i].color
-    #define _MS_PTB(i) pgm_read_byte(&msp[i].black_text)        // handy access to msp[i].black_text
+    // handy accessors
+    #define _MS_PTV(i)  (msp[i].value)                          // handy access to msp[i].value
+    #define _MS_PTC(i)  (msp[i].color)                          // handy access to msp[i].color
+    #define _MS_PTB(i)  (msp[i].black_text)                     // handy access to msp[i].black_text
 
     // geometry setup
-    #define _MS_X0     mapscale_b.x                             // left x
-    #define _MS_X1     (mapscale_b.x + mapscale_b.w)            // right x
-    #define _MS_DX     (_MS_X1-_MS_X0)                          // width
-    #define _MS_MINV   _MS_PTV(0)                               // min value
-    #define _MS_MAXV   _MS_PTV(n_scale-1)                       // max value
-    #define _MS_DV     (_MS_MAXV-_MS_MINV)                      // value span
-    #define _MS_V2X(v) (_MS_X0 + _MS_DX*((v)-_MS_MINV)/_MS_DV)  // convert value to x
-    #define _MS_PRY    (mapscale_b.y+1U)                        // text y
+    #define _MS_X0      mapscale_b.x                            // left x
+    #define _MS_X1      (mapscale_b.x + mapscale_b.w)           // right x
+    #define _MS_DX      (_MS_X1-_MS_X0)                         // width
+    #define _MS_MINV    _MS_PTV(0)                              // min value
+    #define _MS_MAXV    _MS_PTV(n_scale-1)                      // max value
+    #define _MS_DV      (_MS_MAXV-_MS_MINV)                     // value span
+    #define _MS_V2X(v)  (_MS_X0 + _MS_DX*((v)-_MS_MINV)/_MS_DV) // convert value to x
+    #define _MS_PRY     (mapscale_b.y+1U)                       // text y
 
     // set mapscale_b.y above RSS if on else at the bottom
     mapscale_b.y = rss_on ? rss_bnr_b.y - mapscale_b.h: map_b.y + map_b.h - mapscale_b.h;
@@ -1162,19 +1008,28 @@ void drawMapScale()
         }
     }
 
-    // determine DRAP marker location, if used
-    uint16_t drap_x = 0;
-    if (core_map == CM_DRAP) {
-        SPWxValue ssn, flux, kp, swind, drap, bz, bt;
-        NOAASpaceWx noaaspw;
-        float path[BMTRX_COLS];
-        char xray[10];
-        time_t noaaspw_age, xray_age, path_age;
-        getSpaceWeather (ssn, flux, kp, swind, drap, bz, bt, noaaspw,noaaspw_age,xray,xray_age,path,path_age);
-        if (drap.age < 1800 && drap.value != SPW_ERR) {
-            // find drap marker but beware range overflow and leave room for full width
-            float v = CLAMPF (drap.value, _MS_MINV, _MS_MAXV);
-            drap_x = CLAMPF (_MS_V2X(v), mapscale_b.x+3, mapscale_b.x + mapscale_b.w - 4);
+    // determine marker location, if used
+    uint16_t marker_x = 0;
+    if (!prop_map.active) {
+        float v = 0;
+        bool v_ok = false;
+        if (core_map == CM_DRAP) {
+            (void) checkForNewDRAP();
+            if (space_wx[SPCWX_DRAP].value_ok) {
+                v = space_wx[SPCWX_DRAP].value;
+                v_ok = true;
+            }
+        } else if (core_map == CM_AURORA) {
+            (void) checkForNewAurora();
+            if (space_wx[SPCWX_AURORA].value_ok) {
+                v = space_wx[SPCWX_AURORA].value;
+                v_ok = true;
+            }
+        }
+        if (v_ok) {
+            // find marker but beware range overflow and leave room for full width
+            float clamp_v = CLAMPF (v, _MS_MINV, _MS_MAXV);
+            marker_x = CLAMPF (_MS_V2X(clamp_v), mapscale_b.x + 3, mapscale_b.x + mapscale_b.w - 4);
         }
     }
 
@@ -1190,7 +1045,7 @@ void drawMapScale()
     const char *my_title;
 
     // prep values and center x locations
-    if (core_map == CM_WX && !useMetricUnits()) {
+    if (!prop_map.active && core_map == CM_WX && !useMetricUnits()) {
 
         // switch to F scale
         my_title = "Degs F";
@@ -1214,12 +1069,12 @@ void drawMapScale()
 
     }
 
-    // print tick marks across mapscale_b but avoid drap marker
+    // print tick marks across mapscale_b but avoid marker
     for (int i = 1; i < n_ticks; i++) {                         // skip first for title
 
-        // skip if off scale or near drap
+        // skip if off scale or near marker
         const uint16_t ti_x = ticks_x[i];
-        if (ti_x < _MS_X0 || ti_x > _MS_X1 || (drap_x && ti_x >= drap_x - 15 && ti_x <= drap_x + 15))
+        if (ti_x < _MS_X0 || ti_x > _MS_X1 || (marker_x && ti_x >= marker_x - 15 && ti_x <= marker_x + 15))
             continue;
 
         // center but beware edges (we already skipped first so left edge is never a problem)
@@ -1242,14 +1097,14 @@ void drawMapScale()
     tft.setCursor (_MS_X0 + 4, _MS_PRY);
     tft.print (my_title);
 
-    // if DRAP mark the max freq
-    if (drap_x) {
-        // use lines for a perfect vetical match to scale
-        tft.drawLine (drap_x-2, mapscale_b.y, drap_x-2, mapscale_b.y+mapscale_b.h-1, 1, RA8875_BLACK);
-        tft.drawLine (drap_x-1, mapscale_b.y, drap_x-1, mapscale_b.y+mapscale_b.h-1, 1, RA8875_RED);
-        tft.drawLine (drap_x,   mapscale_b.y, drap_x,   mapscale_b.y+mapscale_b.h-1, 1, RA8875_RED);
-        tft.drawLine (drap_x+1, mapscale_b.y, drap_x+1, mapscale_b.y+mapscale_b.h-1, 1, RA8875_RED);
-        tft.drawLine (drap_x+2, mapscale_b.y, drap_x+2, mapscale_b.y+mapscale_b.h-1, 1, RA8875_BLACK);
+    // draw marker
+    if (marker_x) {
+        // use lines, not rect, for a perfect vetical match to scale
+        tft.drawLine (marker_x-2, mapscale_b.y, marker_x-2, mapscale_b.y+mapscale_b.h-1, 1, RA8875_BLACK);
+        tft.drawLine (marker_x-1, mapscale_b.y, marker_x-1, mapscale_b.y+mapscale_b.h-1, 1, RA8875_RED);
+        tft.drawLine (marker_x,   mapscale_b.y, marker_x,   mapscale_b.y+mapscale_b.h-1, 1, RA8875_RED);
+        tft.drawLine (marker_x+1, mapscale_b.y, marker_x+1, mapscale_b.y+mapscale_b.h-1, 1, RA8875_RED);
+        tft.drawLine (marker_x+2, mapscale_b.y, marker_x+2, mapscale_b.y+mapscale_b.h-1, 1, RA8875_BLACK);
     }
 
 }
@@ -1287,18 +1142,10 @@ void eraseMapScale ()
 }
 
 /* log and show message over map_b.
- * always show if ESP else only if force.
  */
 void mapMsg (bool force, uint32_t dwell_ms, const char *fmt, ...)
 {
-#if defined(_IS_ESP8266)
-    (void)force;        // lint
-    bool doit = true;
-#else
-    bool doit = force;
-#endif
-
-    if (doit) {
+    if (force) {
         // format msg
         va_list ap;
         va_start(ap, fmt);

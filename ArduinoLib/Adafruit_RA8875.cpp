@@ -137,6 +137,9 @@ uint32_t spi_speed;
 
 Adafruit_RA8875::Adafruit_RA8875(uint8_t CS, uint8_t RST)
 {
+        (void) CS;
+        (void) RST;
+
 	// emulate a bug in the real RA8875 whereby the very first pixel read back is bogus
 	read_first = true;
 
@@ -154,11 +157,15 @@ Adafruit_RA8875::Adafruit_RA8875(uint8_t CS, uint8_t RST)
         screen_w = screen_h = 0;
 }
 
-void Adafruit_RA8875::setEarthPix (char *day_pixels, char *night_pixels)
+/* set mmap'ed location and size of day and night images, size in units of uint16_t
+ */
+void Adafruit_RA8875::setEarthPix (char *day_pixels, char *night_pixels, int width, int height)
 {
-        DEARTH_BIG = (uint16_t(*)[EARTH_BIG_H][EARTH_BIG_W]) day_pixels;
-        NEARTH_BIG = (uint16_t(*)[EARTH_BIG_H][EARTH_BIG_W]) night_pixels;
+        DEARTH_BIG = (uint16_t*) day_pixels;
+        NEARTH_BIG = (uint16_t*) night_pixels;
 
+        EARTH_BIG_W = width;
+        EARTH_BIG_H = height;
 }
 
 #if defined(_USE_X11)
@@ -564,6 +571,9 @@ void Adafruit_RA8875::setCursor(uint16_t x, uint16_t y)
 void Adafruit_RA8875::getTextBounds(char *string, int16_t x, int16_t y,
     int16_t *x1, int16_t *y1, uint16_t *w, uint16_t *h)
 {
+        (void) x;
+        (void) y;
+
 	uint16_t totw = 0;
 	int16_t miny = 0, maxy = 0;
 	char c;
@@ -841,12 +851,14 @@ bool Adafruit_RA8875::touched(void)
 	return (report_down);
 }
 
-void Adafruit_RA8875::touchRead (uint16_t *x, uint16_t *y)
+void Adafruit_RA8875::touchRead (uint16_t *x, uint16_t *y, int *button)
 {
 	// mouse is in fb_si coords return in app coords
 	pthread_mutex_lock(&mouse_lock);
 	    *x = (mouse_x-FB_X0)/SCALESZ;
 	    *y = (mouse_y-FB_Y0)/SCALESZ;
+            if (button)
+                *button = mouse_button;
 
             // clamp the impossible
             if (*x >= APP_WIDTH) {
@@ -1562,13 +1574,13 @@ float dlatr, float dlngr, float dlatd, float dlngd, float fract_day)
                 ey = (ey + EARTH_BIG_H) % EARTH_BIG_H;
 		uint16_t c16; 
 		if (fract_day == 0) {
-		    c16 = (*NEARTH_BIG)[ey][ex];
+		    c16 = EPIXEL(NEARTH_BIG,ey,ex);
 		} else if (fract_day == 1) {
-		    c16 = (*DEARTH_BIG)[ey][ex];
+		    c16 = EPIXEL(DEARTH_BIG,ey,ex);
 		} else {
 		    // blend from day to night
-		    uint16_t day_pix = (*DEARTH_BIG)[ey][ex];
-		    uint16_t night_pix = (*NEARTH_BIG)[ey][ex];
+		    uint16_t day_pix = EPIXEL(DEARTH_BIG,ey,ex);
+		    uint16_t night_pix = EPIXEL(NEARTH_BIG,ey,ex);
 		    uint8_t day_r = RGB565_R(day_pix);
 		    uint8_t day_g = RGB565_G(day_pix);
 		    uint8_t day_b = RGB565_B(day_pix);
@@ -1615,7 +1627,7 @@ void Adafruit_RA8875::plotChar (char ch)
  */
 void Adafruit_RA8875::setPR (uint16_t x, uint16_t y, uint16_t w, uint16_t h)
 {
-        if (x >= 0 && y >= 0 && x + w <= FB_XRES && y + h <= FB_YRES) {
+        if (x + w <= FB_XRES && y + h <= FB_YRES) {
             pr_x = x*SCALESZ;
             pr_y = y*SCALESZ;
             pr_w = w*SCALESZ;
@@ -1637,7 +1649,7 @@ void Adafruit_RA8875::drawPR(void)
 
 /* return a typed character and current modifier keys if interested (may be NULL), else 0
  */
-char Adafruit_RA8875::getChar(bool *control_set, bool *shift_set)
+char Adafruit_RA8875::getChar (bool *control_set, bool *shift_set)
 {
     char c = 0;
     pthread_mutex_lock (&kb_lock);
@@ -1650,7 +1662,6 @@ char Adafruit_RA8875::getChar(bool *control_set, bool *shift_set)
                 *shift_set = ks.shift;
             if (++kb_qhead == KB_N)
                 kb_qhead = 0;
-            // printf ("getChar= 0x%x %c\n", c, c);
         }
     pthread_mutex_unlock (&kb_lock);
     return (c);
@@ -1658,13 +1669,13 @@ char Adafruit_RA8875::getChar(bool *control_set, bool *shift_set)
 
 /* insert a character into the kb queue
  */
-void Adafruit_RA8875::putChar (char c)
+void Adafruit_RA8875::putChar (char c, bool ctrl, bool shift)
 {
     pthread_mutex_lock (&kb_lock);
         KBState &ks = kb_q[kb_qtail];
         ks.c = c;
-        ks.control = false;
-        ks.shift = false;
+        ks.control = ctrl;
+        ks.shift = shift;
         if (++kb_qtail == KB_N)
             kb_qtail = 0;
     pthread_mutex_unlock (&kb_lock);
@@ -1831,7 +1842,7 @@ void Adafruit_RA8875::captureSelection()
 
             // inject selection into kb q
             for (unsigned i = 0; i < ressize; i++)
-                putChar (result[i]);
+                putChar (result[i], false, false);
 
             XFree(result);
         }
@@ -1846,19 +1857,16 @@ void Adafruit_RA8875::encodeKeyEvent (XKeyEvent *event)
         // check a few values of interest
         KeySym ks = XLookupKeysym (event, 0);
         switch (ks) {
-        case XK_Left:           // convert to vi's h
-            c = 'h';
-            break;
-        case XK_Down:           // convert to vi's j
-            c = 'j';
-            break;
-        case XK_Up:             // convert to vi's k
-            c = 'k';
-            break;
-        case XK_Right:          // convert to vi's l
-            c = 'l';
-            break;
-        case XK_v:              // might be paste
+        case XK_Left:      c = CHAR_LEFT;  break;
+        case XK_Down:      c = CHAR_DOWN;  break;
+        case XK_Up:        c = CHAR_UP;    break;
+        case XK_Right:     c = CHAR_RIGHT; break;
+        case XK_BackSpace: c = CHAR_BS;    break;
+        case XK_Tab:       c = CHAR_TAB;   break;
+        case XK_Return:    c = CHAR_NL;    break;
+        case XK_Escape:    c = CHAR_ESC;   break;
+        case XK_Delete:    c = CHAR_DEL;   break;
+        case XK_v:         // might be paste
             if (requestSelection (XK_v, event->state))
                 return;
             break;
@@ -1878,8 +1886,21 @@ void Adafruit_RA8875::encodeKeyEvent (XKeyEvent *event)
             if (++kb_qtail == KB_N)
                 kb_qtail = 0;
             pthread_mutex_unlock (&kb_lock);
-            // printf ("encode key= 0x%x %c\n", c, c);
         }
+}
+
+/* return Button code from event.
+ * N.B. must be used both in ButtonPress and ButtonRelease
+ */
+// _USE_X11
+int Adafruit_RA8875::decodeMouseButton (XEvent event)
+{
+        // button1+mods or button2 coded as Button2, all else as Button1.
+        // N.B. Mac's report plane Button2 with Button1+Option
+        bool mods = (event.xbutton.state & (Mod1Mask|ControlMask)) != 0;
+        return ((event.xbutton.button == Button1 && mods) || (event.xbutton.button == Button2)
+                        ? Button2 : Button1
+        );
 }
 
 /* thread that runs forever reacting to X11 events and painting fb_canvas whenever it changes
@@ -2048,7 +2069,9 @@ void Adafruit_RA8875::fbThread ()
 		    pthread_mutex_lock (&mouse_lock);
 			mouse_x = event.xbutton.x;
 			mouse_y = event.xbutton.y;
+                        mouse_button = decodeMouseButton (event);
 			mouse_downs++;
+
 		    pthread_mutex_unlock (&mouse_lock);
 
                     // record time of mouse situation change for cursor fade
@@ -2062,7 +2085,9 @@ void Adafruit_RA8875::fbThread ()
 		    pthread_mutex_lock (&mouse_lock);
 			mouse_x = event.xbutton.x;
 			mouse_y = event.xbutton.y;
+                        mouse_button = decodeMouseButton (event);
 			mouse_ups++;
+
 		    pthread_mutex_unlock (&mouse_lock);
 
                     // record time of mouse situation change for cursor fade
@@ -2087,6 +2112,7 @@ void Adafruit_RA8875::fbThread ()
 		    pthread_mutex_lock (&mouse_lock);
 			mouse_x = event.xmotion.x;
 			mouse_y = event.xmotion.y;
+                        mouse_button = event.xbutton.button;    // assumes Button1 == 1 etc
 		    pthread_mutex_unlock (&mouse_lock);
 
                     // record time of mouse situation change for cursor fade
@@ -2176,10 +2202,10 @@ bool Adafruit_RA8875::warpCursor (char dir, unsigned n, int *xp, int *yp)
 
         // move by n app positions
         switch (dir) {
-        case 'h': new_x = win_x-n*SCALESZ; break;       // left
-        case 'j': new_y = win_y+n*SCALESZ; break;       // down
-        case 'k': new_y = win_y-n*SCALESZ; break;       // up
-        case 'l': new_x = win_x+n*SCALESZ; break;       // right
+        case CHAR_LEFT:  new_x = win_x-n*SCALESZ; break;
+        case CHAR_DOWN:  new_y = win_y+n*SCALESZ; break;
+        case CHAR_UP:    new_y = win_y-n*SCALESZ; break;
+        case CHAR_RIGHT: new_x = win_x+n*SCALESZ; break;
         default: break;
         }
 
@@ -2558,10 +2584,10 @@ bool Adafruit_RA8875::warpCursor (char dir, unsigned n, int *xp, int *yp)
 
         // move by n app positions
         switch (dir) {
-        case 'h': new_x = mouse_x-n*SCALESZ; break;       // left
-        case 'j': new_y = mouse_y+n*SCALESZ; break;       // down
-        case 'k': new_y = mouse_y-n*SCALESZ; break;       // up
-        case 'l': new_x = mouse_x+n*SCALESZ; break;       // right
+        case CHAR_LEFT:  new_x = mouse_x-n*SCALESZ; break;
+        case CHAR_DOWN:  new_y = mouse_y+n*SCALESZ; break;
+        case CHAR_UP:    new_y = mouse_y-n*SCALESZ; break;
+        case CHAR_RIGHT: new_x = mouse_x+n*SCALESZ; break;
         default: break;
         }
 
@@ -2617,27 +2643,19 @@ void Adafruit_RA8875::kbThread ()
             // read next char, beware trouble
 	    int nr = read (kb_fd, buf, 1);
 	    if (nr == 1) {
-		pthread_mutex_lock (&kb_lock);
-                    printf ("KB: %d %c\n", buf[0], buf[0]);
-                    KBState &ks = kb_q[kb_qtail];
-                    if (isupper(buf[0])) {
-                        ks.c = tolower(buf[0]);
-                        ks.control = false;
-                        ks.shift = true;
-                    } else if (buf[0] == '\10' || buf[0] == '\13' || buf[0] == '\14') {
-                        // one of ^hkl for keyboard cursor control; but not ^j because that's Enter
-                        ks.c = buf[0] + 96;     // convert to lower case printable char...
-                        ks.control = true;      // ... with control set
-                        ks.shift = false;
-                    } else {
+                // arrow keys need a state machine to parse ESC [ A/B/C/D, plus non-block for normal ESC
+                printf ("KB: %d %c\n", buf[0], buf[0]);
+                if (isprint(buf[0])) {
+                    pthread_mutex_lock (&kb_lock);
+                        KBState &ks = kb_q[kb_qtail];
                         ks.c = buf[0];
                         ks.control = false;
                         ks.shift = false;
-                    }
-                    if (++kb_qtail == KB_N)
-                        kb_qtail = 0;
-		    fb_dirty = true;
-		pthread_mutex_unlock (&kb_lock);
+                        if (++kb_qtail == KB_N)
+                            kb_qtail = 0;
+                        fb_dirty = true;
+                    pthread_mutex_unlock (&kb_lock);
+                }
 	    } else {
                 if (nr < 0)
                     printf ("KB: %s\n", strerror(errno));

@@ -50,10 +50,14 @@ void EEPROM::begin (int s)
         // establish filename
         filename = getFilename();
 
-        // start over if called again
+        // start over if called again or force
         if (fp) {
             fclose(fp);
             fp = NULL;
+        }
+        if (rm_eeprom) {
+            (void) unlink (filename);
+            rm_eeprom = false;  // only once!
         }
         if (data_array) {
             free (data_array);
@@ -112,7 +116,11 @@ bool EEPROM::commit(void)
 void EEPROM::write (uint32_t address, uint8_t byte)
 {
         // set array if available and address is in bounds
-        if (data_array && address < n_data_array)
+        if (!data_array)
+            printf ("EEPROM.write: no data_array\n");
+        else if (address >= n_data_array)
+            printf ("EEPROM.write: %d >= %d\n", address, (int)n_data_array);
+        else 
             data_array[address] = byte;
 }
 

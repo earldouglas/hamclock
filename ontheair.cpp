@@ -12,55 +12,49 @@ const char *onta_names[ONTA_N] = {
 #undef X
 
 
+// config
 #define POTA_COLOR      RGB565(150,250,255)             // title and spot text color
 #define SOTA_COLOR      RGB565(250,0,0)                 // title and spot text color
-
 #define COUNT_DY        32                              // dy of count
 #define START_DY        47                              // dy of first row
 #define ONTA_ROWDY      14                              // dy of each successive row
-#define ONTA_INDENT     1                               // l-r border -- very tight fit
-#define MAX_LINE        27                              // max line length, including EOS
-#define MAX_VIS         ((PLOTBOX_H - START_DY)/ONTA_ROWDY)             // max visible rows
+#define LL_PANE_0       23                              // line length for PANE_0
+#define LL_PANE_123     27                              // line length for others
 
 
-// max spots to keep
-#define MAX_SPOTS       (MAX_VIS+nMoreScrollRows())
-
-
-
-/* qsort-style function to compare two DXClusterSpot by freq
+/* qsort-style function to compare two DXSpot by freq
  */
 static int ontaqsDXCFreq (const void *v1, const void *v2)
 {
-    DXClusterSpot *s1 = (DXClusterSpot *)v1;
-    DXClusterSpot *s2 = (DXClusterSpot *)v2;
+    DXSpot *s1 = (DXSpot *)v1;
+    DXSpot *s2 = (DXSpot *)v2;
     return (s1->kHz - s2->kHz);
 }
 
-/* qsort-style function to compare two DXClusterSpot by de_call AKA id
+/* qsort-style function to compare two DXSpot by rx_call AKA id
  */
 static int ontaqsDXCDECall (const void *v1, const void *v2)
 {
-    DXClusterSpot *s1 = (DXClusterSpot *)v1;
-    DXClusterSpot *s2 = (DXClusterSpot *)v2;
-    return (strcmp (s1->de_call, s2->de_call));
+    DXSpot *s1 = (DXSpot *)v1;
+    DXSpot *s2 = (DXSpot *)v2;
+    return (strcmp (s1->rx_call, s2->rx_call));
 }
 
-/* qsort-style function to compare two DXClusterSpot by dx_grid
+/* qsort-style function to compare two DXSpot by tx_grid
  */
 static int ontaqsDXCDXCall (const void *v1, const void *v2)
 {
-    DXClusterSpot *s1 = (DXClusterSpot *)v1;
-    DXClusterSpot *s2 = (DXClusterSpot *)v2;
-    return (strcmp (s1->dx_call, s2->dx_call));
+    DXSpot *s1 = (DXSpot *)v1;
+    DXSpot *s2 = (DXSpot *)v2;
+    return (strcmp (s1->tx_call, s2->tx_call));
 }
 
-/* qsort-style function to compare two DXClusterSpot by time spotted
+/* qsort-style function to compare two DXSpot by time spotted
  */
 static int ontaqsDXCSpotted (const void *v1, const void *v2)
 {
-    DXClusterSpot *s1 = (DXClusterSpot *)v1;
-    DXClusterSpot *s2 = (DXClusterSpot *)v2;
+    DXSpot *s1 = (DXSpot *)v1;
+    DXSpot *s2 = (DXSpot *)v2;
     return (s1->spotted - s2->spotted);
 }
 
@@ -88,104 +82,99 @@ static const ONTASortInfo onta_sorts[ONTAS_N] = {
 
 // one ONTA state info
 typedef struct {
-    const char *page;                           // query to query page
+    const char *page;                           // query page
     const char *prog;                           // project name, SOTA POTA etc
     uint16_t color;                             // title color
     uint8_t whoami;                             // one of ONTAProgram
-    uint8_t NV_id;                              // non-volatile memory NV_ id
-    uint8_t PLOT_CH_id;                         // PLOT_CH_ id
+    NV_Name nv;                                 // non-volatile sort key
+    PlotChoice pc;                              // PLOT_CH_ id for this data
+    PlotPane pp;                                // PANE_X for the current display
     uint8_t sortby;                             // one of ONTASort
     ScrollState ss;                             // scroll state info
-    DXClusterSpot *spots;                       // malloced collection, smallest sort field first
+    DXSpot *spots;                              // malloced collection, smallest sort field first
+    time_t next_update;                         // when next to update
+    bool ok;                                    // whether info is been updated succuessfully
 } ONTAState;
 
+static const char pota_page[] = "/POTA/pota-activators.txt";
+static const char sota_page[] = "/SOTA/sota-activators.txt";
 
 // current program states
 // N.B. must assign in same order as ONTAProgram
 static ONTAState onta_state[ONTA_N] = { 
-    { "/POTA/pota-activators.txt", onta_names[ONTA_POTA], POTA_COLOR, ONTA_POTA,
-                NV_ONTASPOTA, PLOT_CH_POTA, ONTAS_AGE, {MAX_VIS, 0, 0}, NULL },
-    { "/SOTA/sota-activators.txt", onta_names[ONTA_SOTA], SOTA_COLOR, ONTA_SOTA,
-                NV_ONTASSOTA, PLOT_CH_SOTA, ONTAS_AGE, {MAX_VIS, 0, 0}, NULL },
+    { pota_page, onta_names[ONTA_POTA], POTA_COLOR, ONTA_POTA, NV_ONTASPOTA,
+                PLOT_CH_POTA, PANE_NONE, ONTAS_AGE, {}, {}, 0, false},
+    { sota_page, onta_names[ONTA_SOTA], SOTA_COLOR, ONTA_SOTA, NV_ONTASSOTA,
+                PLOT_CH_SOTA, PANE_NONE, ONTAS_AGE, {}, {}, 0, false},
 };
 
-
-/* save each ONTA sort choices
+/* save this ONTA sort choice
  */
-static void saveONTASorts(void)
+static void saveONTASortby(const ONTAState *osp)
 {
-    for (int i = 0; i < ONTA_N; i++) {
-        ONTAState *osp = &onta_state[i];
-        NVWriteUInt8 ((NV_Name)osp->NV_id, osp->sortby);
-    }
+    NVWriteUInt8 (osp->nv, osp->sortby);
 }
 
-/* init each ONTA sort choice from NV
+/* load this ONTA sort choice from NV
  */
-static void initONTASorts(void)
+static void loadONTASortby(ONTAState *osp)
 {
-    uint8_t sortby;
-
-    for (int i = 0; i < ONTA_N; i++) {
-        ONTAState *osp = &onta_state[i];
-        if (!NVReadUInt8 ((NV_Name)osp->NV_id, &sortby) || sortby >= ONTAS_N) {
-            sortby = ONTAS_AGE;
-            NVWriteUInt8 ((NV_Name)osp->NV_id, sortby);
-        }
-        osp->sortby = sortby;
+    if (!NVReadUInt8 (osp->nv, &osp->sortby) || osp->sortby >= ONTAS_N) {
+        osp->sortby = ONTAS_AGE;
+        NVWriteUInt8 (osp->nv, osp->sortby);
     }
 }
 
 
-/* create a line of text for the given spot.
+/* create a line of text that fits within the box used for PANE_0 or PANE-123 for the given spot.
  */
-static void formatONTASpot (const DXClusterSpot &spot, const ONTAState *osp, char line[MAX_LINE], int &flen)
+static void formatONTASpot (const DXSpot &spot, const ONTAState *osp, const SBox &box,
+    char *line, size_t l_len, int &freq_len)
 {
-    // n chars in each field; all lengths are sans EOS and intervening gaps
-    const unsigned ID_LEN = osp->whoami == ONTA_POTA ? 7 : 10;
-    const unsigned AGE_LEN = osp->whoami == ONTA_POTA ? 3 : 1;
-    #define FREQ_LEN        6
-    #define CALL_LEN        (MAX_LINE - FREQ_LEN - AGE_LEN - ID_LEN - 4) // -EOS and -3 spaces
+    if (BOX_IS_PANE_0(box)) {
 
-    // pretty freq + trailing space
-    int l = snprintf (line, MAX_LINE, _FX("%*.0f "), FREQ_LEN, spot.kHz);
+        // n chars in each field; all lengths are sans EOS and intervening gaps
+        const unsigned AGE_LEN = 3;
+        const unsigned FREQ_LEN = 6;
+        const unsigned CALL_LEN = (LL_PANE_0 - FREQ_LEN - AGE_LEN - 3);     // sans EOS and -2 spaces
 
-    // return n chars in frequency
-    flen = l - 1;               // sans trailing space
+        // pretty freq + trailing space
+        size_t l = snprintf (line, l_len, "%*.0f ", FREQ_LEN, spot.kHz);
 
-    // add dx call; truncate if too long or look for / and use longest side
-    if (strlen (spot.dx_call) > CALL_LEN) {
-        const char *slash = strchr (spot.dx_call, '/');
-        if (slash) {
-            // use longest section
-            int left_len = slash - spot.dx_call;
-            int rite_len = strlen (slash+1);
-            if (left_len > rite_len)
-                l += snprintf (line+l, MAX_LINE-l, _FX("%-*.*s"), CALL_LEN, left_len, spot.dx_call);
-            else
-                l += snprintf (line+l, MAX_LINE-l, _FX("%-*.*s"),CALL_LEN, CALL_LEN, spot.dx_call+left_len+1);
-        } else {
-            // no choice but to truncate
-            l += snprintf (line+l, MAX_LINE-l, _FX("%.*s"), CALL_LEN, spot.dx_call);
-        }
+        // return n chars in frequency
+        freq_len = FREQ_LEN;
+
+        // add dx call
+        l += snprintf (line+l, l_len-l, "%-*.*s ", CALL_LEN, CALL_LEN, spot.tx_call);
+
+        // age on right, 3 columns
+        int age = myNow() - spot.spotted;
+        (void) formatAge (age, line+l, l_len-l, 3);
+
     } else {
-        // fits ok as-is
-        l += snprintf (line+l, MAX_LINE-l, _FX("%-*.*s"), CALL_LEN, CALL_LEN, spot.dx_call);
+
+        // n chars in each field; all lengths are sans EOS and intervening gaps
+        const unsigned ID_LEN = osp->whoami == ONTA_POTA ? 7 : 10;
+        const unsigned AGE_LEN = osp->whoami == ONTA_POTA ? 3 : 1;
+        const unsigned FREQ_LEN = 6;
+        const unsigned CALL_LEN = (LL_PANE_123 - FREQ_LEN - AGE_LEN - ID_LEN - 4);   // sans EOS and -3 spaces
+
+        // pretty freq + trailing space
+        size_t l = snprintf (line, l_len, "%*.0f ", FREQ_LEN, spot.kHz);
+
+        // return n chars in frequency
+        freq_len = FREQ_LEN;
+
+        // add dx call
+        l += snprintf (line+l, l_len-l, "%-*.*s ", CALL_LEN, CALL_LEN, spot.tx_call);
+
+        // spot id
+        l += snprintf (line+l, l_len-l, "%-*.*s ", ID_LEN, ID_LEN, spot.rx_call);
+
+        // age on right
+        int age = myNow() - spot.spotted;
+        (void) formatAge (age, line+l, l_len-l, osp->whoami == ONTA_SOTA ? 1 : 3);
     }
-
-    // leading space then spot id
-    l += snprintf (line+l, MAX_LINE-l, _FX(" %*.*s"), ID_LEN, ID_LEN, spot.de_call);
-
-    // age on right
-    int age_min = (myNow() - spot.spotted + 30)/60;
-    if (osp->whoami == ONTA_SOTA) {
-        // only room for 1 column
-        if (age_min < 10)
-            snprintf (line+l, MAX_LINE-l, _FX(" %d"), age_min);
-        else
-            snprintf (line+l, MAX_LINE-l, _FX(" +"));
-    } else
-        snprintf (line+l, MAX_LINE-l, _FX(" %2dm"), age_min);
 }
 
 /* redraw all visible otaspots in the given pane box.
@@ -195,7 +184,7 @@ static void drawONTAVisSpots (const SBox &box, const ONTAState *osp)
 {
     tft.fillRect (box.x+1, box.y + START_DY-1, box.w-2, box.h - START_DY - 1, RA8875_BLACK);
     selectFontStyle (LIGHT_FONT, FAST_FONT);
-    uint16_t x = box.x + ONTA_INDENT;
+    uint16_t x = box.x + 1;
     uint16_t y0 = box.y + START_DY;
 
     // draw otaspots top_vis on top
@@ -204,25 +193,29 @@ static void drawONTAVisSpots (const SBox &box, const ONTAState *osp)
 
         for (int i = min_i; i <= max_i; i++) {
             // get info line
-            const DXClusterSpot &spot = osp->spots[i];
-            char line[MAX_LINE];
-            int flen;
-            formatONTASpot (spot, osp, line, flen);
+            const DXSpot &spot = osp->spots[i];
+            char line[50];
+            int freq_len;
+            formatONTASpot (spot, osp, box, line, sizeof(line), freq_len);
 
             // set y location
             uint16_t y = y0 + osp->ss.getDisplayRow(i) * ONTA_ROWDY;
+
+            // highlight overall bg if on watch list
+            if (onSPOTAWatchList (spot.tx_call))
+                tft.fillRect (x, y-1, box.w-2, ONTA_ROWDY-3, RA8875_RED);
 
             // show freq with proper band map color background
             uint16_t bg_col = getBandColor ((long)(spot.kHz*1000));           // wants Hz
             uint16_t txt_col = getGoodTextColor (bg_col);
             tft.setTextColor(txt_col);
-            tft.fillRect (x, y-1, flen*6, ONTA_ROWDY-3, bg_col);
+            tft.fillRect (x, y-1, freq_len*6, ONTA_ROWDY-3, bg_col);
             tft.setCursor (x, y);
-            tft.printf (_FX("%*.*s"), flen, flen, line);
+            tft.printf ("%*.*s", freq_len, freq_len, line);
 
             // show remainder of line in white
             tft.setTextColor(RA8875_WHITE);
-            tft.printf (line+flen);
+            tft.printf (line+freq_len);
         }
     }
 
@@ -250,7 +243,7 @@ static void drawONTA (const SBox &box, const ONTAState *osp)
     selectFontStyle (LIGHT_FONT, FAST_FONT);
     tft.setTextColor(RA8875_WHITE);
     tft.setCursor (box.x + (box.w-10)/2, box.y + COUNT_DY);
-    tft.printf (_FX("%d"), osp->ss.n_data);
+    tft.printf ("%d", osp->ss.n_data);
 
     // show each spot
     drawONTAVisSpots (box, osp);
@@ -278,14 +271,10 @@ static void scrollONTADown (const SBox &box, ONTAState *osp)
 
 /* set radio and new DX from given spot
  */
-static void engageONTARow (DXClusterSpot &s)
+static void engageONTARow (DXSpot &s)
 {
     setRadioSpot(s.kHz);
-
-    LatLong ll;
-    ll.lat_d = rad2deg(s.dx_lat);
-    ll.lng_d = rad2deg(s.dx_lng);
-    newDX (ll, NULL, s.dx_call);       // normalizes
+    newDX (s.tx_ll, NULL, s.tx_call);
 }
 
 
@@ -329,11 +318,11 @@ static void runONTASortMenu (const SBox &box, ONTAState *osp)
         else if (mitems[5].set)
             osp->sortby = ONTAS_ID;
         else
-            fatalError (_FX("runONTASortMenu no menu set"));
+            fatalError ("runONTASortMenu no menu set");
 
-        // update
-        saveONTASorts();
-        updateOnTheAir (box, (ONTAProgram)(osp->whoami));
+        // fresh update
+        saveONTASortby(osp);
+        updateOnTheAir (box, (ONTAProgram)(osp->whoami), true);
 
     } else {
 
@@ -352,12 +341,12 @@ static ONTAState *getONTAState (ONTAProgram whoami)
     switch (whoami) {
     case ONTA_POTA: osp = &onta_state[ONTA_POTA]; break;
     case ONTA_SOTA: osp = &onta_state[ONTA_SOTA]; break;
-    default: fatalError (_FX("invalid ONTA whoami %d"), whoami); break;
+    default: fatalError ("invalid ONTA whoami %d", whoami); break;
     }
 
     // confirm consistent
     if (osp->whoami != whoami)
-        fatalError (_FX("inconsistent ONTA whoami %d %d"), whoami, osp->whoami);
+        fatalError ("inconsistent ONTA whoami %d %d", whoami, osp->whoami);
 
     // good!
     return (osp);
@@ -365,33 +354,23 @@ static ONTAState *getONTAState (ONTAProgram whoami)
 
 /* reset storage for the given program
  */
-static void resetONTAStorage (ONTAState *osp)
+static void resetONTAStorage (const SBox &box, ONTAState *osp)
 {
     free (osp->spots);
     osp->spots = NULL;
-    osp->ss.n_data = 0;
-    osp->ss.top_vis = 0;
+    osp->ss.init ((box.h - START_DY)/ONTA_ROWDY, 0, 0);         // max_vis, top_vis, n_data = 0;
 }
 
-/* read fresh ontheair info and draw pane in box.
+/* download fresh spots for the given program.
+ * return whether io ok, even if no data.
+ * N.B. we assume spot list has been reset
  */
-bool updateOnTheAir (const SBox &box, ONTAProgram whoami)
+static bool retrieveONTA (ONTAState *osp)
 {
-    // get proper state
-    ONTAState *osp = getONTAState (whoami);
-
-    // reset
-    resetONTAStorage (osp);
-
-    initONTASorts();
-    int n_read = 0;
-
+    // go
     WiFiClient onta_client;
-
-    // line will contain error message if reach out label and !ok
-    char line[100];
-    strcpy (line, _FX("download error"));
     bool ok = false;
+    int n_read = 0;
 
     Serial.println (osp->page);
     if (wifiOk() && onta_client.connect(backend_host, backend_port)) {
@@ -401,13 +380,17 @@ bool updateOnTheAir (const SBox &box, ONTAProgram whoami)
         updateClocks(false);
 
         // fetch page and skip header
-        httpHCGET (onta_client, backend_host, osp->page);
+        httpHCPGET (onta_client, backend_host, osp->page);
         if (!httpSkipHeader (onta_client)) {
-            Serial.print (F("OnTheAir download failed\n"));
-            snprintf (line, sizeof(line), _FX("%s header error"), osp->prog);
+            Serial.print ("OnTheAir download failed\n");
             goto out;
         }
+
+        // configure max spots to collect
+        int max_spots = osp->ss.max_vis + nMoreScrollRows();
+
         // add each spot
+        char line[100];
         while (getTCPLine (onta_client, line, sizeof(line), NULL)) {
 
             // skip comments
@@ -415,55 +398,68 @@ bool updateOnTheAir (const SBox &box, ONTAProgram whoami)
                 continue;
 
             // parse -- error message if not recognized
-            char dxcall[12], iso[20], dxgrid[7], mode[8], id[12];       // N.B. match sscanf field lengths
-            float lat, lng;
+            char dxcall[20], iso[20], dxgrid[7], mode[8], id[12];       // N.B. match sscanf field lengths
+            float lat_d, lng_d;
             unsigned long hz;
             // JI1ORE,430510000,2023-02-19T07:00:14,CW,QM05,35.7566,140.189,JA-1234
-            if (sscanf (line, _FX("%11[^,],%lu,%19[^,],%7[^,],%6[^,],%f,%f,%11s"),
-                                dxcall, &hz, iso, mode, dxgrid, &lat, &lng, id) != 8) {
+            if (sscanf (line, "%19[^,],%lu,%19[^,],%7[^,],%6[^,],%f,%f,%11s",
+                                dxcall, &hz, iso, mode, dxgrid, &lat_d, &lng_d, id) != 8) {
 
                 // maybe a blank mode?
-                if (sscanf (line, _FX("%11[^,],%lu,%19[^,],,%6[^,],%f,%f,%11s"),
-                                dxcall, &hz, iso, dxgrid, &lat, &lng, id) != 7) {
-                    Serial.printf (_FX("ONTA: bogus line: %s\n"), line);
-
-                    // leave message in line
+                if (sscanf (line, "%19[^,],%lu,%19[^,],,%6[^,],%f,%f,%11s",
+                                dxcall, &hz, iso, dxgrid, &lat_d, &lng_d, id) != 7) {
+                    Serial.printf ("%s: %s\n", osp->prog, line);
                     goto out;
                 }
                 // .. yup that was it
                 mode[0] = '\0';
             }
 
-            // ignore GHz spots because they are too wide to print
-            if (hz >= 1000000000) {
-                Serial.printf (_FX("ONTA: ignoring freq >= 1 GHz: %s\n"), line);
+            // ignore long calls
+            if (strlen (dxcall) >= MAX_SPOTCALL_LEN) {
+                Serial.printf ("%s: ignoring long call: %s\n", osp->prog, line);
                 continue;
             }
 
-            // append to spots list up to MAX_SPOTS
-            if (osp->ss.n_data == MAX_SPOTS) {
+            // ignore GHz spots because they are too wide to print
+            if (hz >= 1000000000) {
+                Serial.printf ("%s: ignoring freq >= 1 GHz: %s\n", osp->prog, line);
+                continue;
+            }
+
+            // add unless not on exclusive watch list
+            if (showOnlyOnSPOTAWatchList() && !onSPOTAWatchList(dxcall)) {
+                Serial.printf ("%s: %s not on watch list\n", osp->prog, dxcall);
+                continue;
+            }
+
+            // append to spots list up to max_spots
+            if (osp->ss.n_data == max_spots) {
                 // no more so shift out the oldest
-                memmove (osp->spots, &osp->spots[1], (MAX_SPOTS-1) * sizeof(DXClusterSpot));
-                osp->ss.n_data = MAX_SPOTS - 1;
+                memmove (osp->spots, &osp->spots[1], (max_spots-1) * sizeof(DXSpot));
+                osp->ss.n_data = max_spots - 1;
             } else {
                 // add 1 more
-                osp->spots = (DXClusterSpot*) realloc (osp->spots, (osp->ss.n_data+1)*sizeof(DXClusterSpot));
+                osp->spots = (DXSpot*) realloc (osp->spots, (osp->ss.n_data+1)*sizeof(DXSpot));
                 if (!osp->spots)
-                    fatalError (_FX("No room for %d spots"), osp->ss.n_data+1);
+                    fatalError ("No room for %d spots", osp->ss.n_data+1);
             }
-            DXClusterSpot *new_sp = &osp->spots[osp->ss.n_data++];
+            DXSpot *new_sp = &osp->spots[osp->ss.n_data++];
             memset (new_sp, 0, sizeof(*new_sp));
 
-            // repurpose de_call for id, de_grid for list name
-            strncpy (new_sp->de_call, id, sizeof(new_sp->de_call));
-            strncpy (new_sp->de_grid, osp->prog, sizeof(new_sp->de_grid)-1);
-            strncpy (new_sp->dx_call, dxcall, sizeof(new_sp->dx_call));
-            strncpy (new_sp->dx_grid, dxgrid, sizeof(new_sp->dx_grid));
-            strncpy (new_sp->mode, mode, sizeof(new_sp->mode));
-            new_sp->dx_lat = deg2rad(lat);
-            new_sp->dx_lng = deg2rad(lng);
-            new_sp->de_lat = de_ll.lat;
-            new_sp->de_lng = de_ll.lng;
+            // since there is no info for spotters, set rx_ll to DE and
+            // repurpose rx_call for id and rx_grid for list name
+            new_sp->rx_ll = de_ll;
+            memcpy (new_sp->rx_call, id, MAX_SPOTCALL_LEN);
+            memcpy (new_sp->rx_grid, osp->prog, MAX_SPOTGRID_LEN);
+
+            memcpy (new_sp->tx_call, dxcall, MAX_SPOTCALL_LEN);
+            memcpy (new_sp->tx_grid, dxgrid, MAX_SPOTGRID_LEN);
+            new_sp->tx_ll.lat_d = lat_d;
+            new_sp->tx_ll.lng_d = lng_d;
+            normalizeLL (new_sp->tx_ll);
+
+            memcpy (new_sp->mode, mode, sizeof(new_sp->mode));
             new_sp->kHz = hz / 1000.0F;
             new_sp->spotted = crackISO8601 (iso);
 
@@ -471,28 +467,54 @@ bool updateOnTheAir (const SBox &box, ONTAProgram whoami)
             n_read++;
         }
 
-        // fresh screen coords
-        updateOnTheAirSpotScreenLocations();
-
         // ok, even if none found
         ok = true;
     }
 
 out:
 
-    if (ok) {
-        Serial.printf (_FX("ONTA: read %d new spots\n"), n_read);
-        qsort (osp->spots, osp->ss.n_data, sizeof(DXClusterSpot), onta_sorts[osp->sortby].qsf);
+    // done
+    Serial.printf ("%s: read %d new spots\n", osp->prog, n_read);
+    onta_client.stop();
+
+    // result
+    return (ok);
+}
+
+/* draw POTA or SOTA pane in box, beware thinner PANE_0.
+ * return whether io ok.
+ */
+bool updateOnTheAir (const SBox &box, ONTAProgram whoami, bool force)
+{
+    // get state of desired program
+    ONTAState *osp = getONTAState (whoami);
+
+    // update if forced, expired or change panes
+    // changing panes doesn't really need new data but we must do so in order to reset the Scroller.
+    if (force || !osp->ok || myNow() > osp->next_update || findPaneChoiceNow(osp->pc) != osp->pp) {
+        osp->pp = findPaneChoiceNow(osp->pc);
+        resetONTAStorage (box, osp);
+        osp->ok = retrieveONTA (osp);
+        osp->next_update = myNow() + ONTA_INTERVAL;
+    }
+
+    // always update sortby in case user changed projection etc 
+    loadONTASortby(osp);
+    qsort (osp->spots, osp->ss.n_data, sizeof(DXSpot), onta_sorts[osp->sortby].qsf);
+
+    // display spots or err
+    if (osp->ok) {
+        // show data
         osp->ss.scrollToNewest();
         drawONTA (box, osp);
     } else {
-        resetONTAStorage (osp);
-        plotMessage (box, RA8875_RED, line);
+        // report trouble
+        char msg[100];
+        snprintf (msg, sizeof(msg), "%s: data error", osp->prog);
+        plotMessage (box, RA8875_RED, msg);
     }
 
-    onta_client.stop();
-
-    return (ok);
+    return (osp->ok);
 }
 
 /* implement a tap at s known to be within the given box for our Pane.
@@ -528,7 +550,7 @@ bool checkOnTheAirTouch (const SCoord &s, const SBox &box, ONTAProgram whoami)
 
     // tapped a row, engage if defined
     int spot_row;
-    int vis_row = (s.y - START_DY)/ONTA_ROWDY;
+    int vis_row = (s.y - (box.y + START_DY))/ONTA_ROWDY;
     if (osp->ss.findDataIndex (vis_row, spot_row))
         engageONTARow (osp->spots[spot_row]);
 
@@ -541,13 +563,13 @@ bool checkOnTheAirTouch (const SCoord &s, const SBox &box, ONTAProgram whoami)
  * ok to pass back if not displayed because spot list is still intact.
  * N.B. caller should not modify the list
  */
-bool getOnTheAirSpots (DXClusterSpot **spp, uint8_t *nspotsp, ONTAProgram whoami)
+bool getOnTheAirSpots (DXSpot **spp, uint8_t *nspotsp, ONTAProgram whoami)
 {
     // get proper state
     ONTAState *osp = getONTAState (whoami);
 
     // none if no spots or not showing
-    if (!osp->spots || findPaneForChoice ((PlotChoice)osp->PLOT_CH_id) == PANE_NONE)
+    if (!osp->spots || findPaneForChoice ((PlotChoice)osp->pc) == PANE_NONE)
         return (false);
 
     // pass back
@@ -558,32 +580,6 @@ bool getOnTheAirSpots (DXClusterSpot **spp, uint8_t *nspotsp, ONTAProgram whoami
     return (true);
 }
 
-#if defined (_IS_ESP8266)
-
-/* return whether the given location is over any OTA spots
- * ESP only
- */
-bool overAnyOnTheAirSpots (const SCoord &s)
-{
-    // check all spots
-    for (int i = 0; i < ONTA_N; i++) {
-        ONTAState *osp = &onta_state[i];
-        if (osp->spots && findPaneForChoice ((PlotChoice)osp->PLOT_CH_id) != PANE_NONE) {
-            for (int j = 0; j < osp->ss.n_data; j++) {
-                // N.B. inCircle works even though map_c is in Raw coords because on ESP they equal canonical
-                if (labelSpots() ? inBox(s, osp->spots[j].dx_map.map_b)
-                                 : (dotSpots() ? inCircle(s, osp->spots[j].dx_map.map_c) : false))
-                    return (true);
-            }
-        }
-    }
-
-    // none
-    return (false);
-}
-
-#endif // _IS_ESP8266
-
 /* draw all current OTA spots on the map
  */
 void drawOnTheAirSpotsOnMap (void)
@@ -591,39 +587,31 @@ void drawOnTheAirSpotsOnMap (void)
     // draw all spots
     for (int i = 0; i < ONTA_N; i++) {
         ONTAState *osp = &onta_state[i];
-        if (osp->spots && findPaneForChoice ((PlotChoice)osp->PLOT_CH_id) != PANE_NONE) {
+        if (osp->spots && findPaneForChoice ((PlotChoice)osp->pc) != PANE_NONE) {
             for (int j = 0; j < osp->ss.n_data; j++) {
-                drawDXCLabelOnMap (osp->spots[j]);
+                drawSpotLabelOnMap (osp->spots[j], LOM_TXEND, LOM_ALL);
             }
-        }
-    }
-}
-
-/* update screen coords of each OTA spot, called ostensibly when projection changes.
- */
-void updateOnTheAirSpotScreenLocations (void)
-{
-    for (int i = 0; i < ONTA_N; i++) {
-        ONTAState *osp = &onta_state[i];
-        for (int j = 0; j < osp->ss.n_data; j++) {
-            setDXCSpotPosition (osp->spots[j]);
         }
     }
 }
 
 /* find closest otaspot and location on either end to given ll, if any.
  */
-bool getClosestOnTheAirSpot (const LatLong &ll, DXClusterSpot *dxc_closest, LatLong *ll_closest)
+bool getClosestOnTheAirSpot (const LatLong &ll, DXSpot *dxc_closest, LatLong *ll_closest)
 {
+    // bale if not even plotted
+    if (getSpotLabelType() == LBL_NONE)
+        return (false);
+
     // find closest spot among all lists
     LatLong ll_cl;
-    DXClusterSpot dxc_cl;
+    DXSpot dxc_cl;
     bool found_any = false;
     float best_cl = 0;
     for (int i = 0; i < ONTA_N; i++) {
         ONTAState *osp = &onta_state[i];
-        if (osp->spots && findPaneForChoice ((PlotChoice)osp->PLOT_CH_id) != PANE_NONE
-                                && getClosestDXC (osp->spots, osp->ss.n_data, ll, &dxc_cl, &ll_cl)) {
+        if (osp->spots && findPaneForChoice ((PlotChoice)osp->pc) != PANE_NONE
+                                && getClosestSpot (osp->spots, osp->ss.n_data, ll, &dxc_cl, &ll_cl)) {
             if (found_any) {
                 // see if this is even closer than one found so far
                 float new_cl = simpleSphereDist (ll, ll_cl);
@@ -643,15 +631,4 @@ bool getClosestOnTheAirSpot (const LatLong &ll, DXClusterSpot *dxc_closest, LatL
     }
 
     return (found_any);
-}
-
-/* reset storage if no longer being used
- */
-void checkOnTheAirActive(void)
-{
-    for (int i = 0; i < ONTA_N; i++) {
-        ONTAState *osp = &onta_state[i];
-        if (osp->spots && findPaneForChoice ((PlotChoice)osp->PLOT_CH_id) == PANE_NONE)
-            resetONTAStorage (osp);
-    }
 }

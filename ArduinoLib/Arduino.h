@@ -54,11 +54,11 @@ extern void delay (uint32_t ms);
 extern uint16_t analogRead(int pin);
 extern void setup(void);
 extern void loop(void);
+extern bool rm_eeprom;
 
 
 extern char **our_argv;
 extern char our_make[];
-extern std::string our_dir;
 
 extern void capturePasswords (const char *fn);
 

@@ -22,6 +22,17 @@ const char platform[] = "HamClock-UNIX";
 #endif
 
 
+#if defined(__GNUC__)
+static void sendHTTPError (WiFiClient &client, const char *fmt, ...) __attribute__ ((format(__printf__,2,3)));
+static void demoMsg (bool ok, int n, char buf[], size_t buf_len, const char *fmt, ...)
+        __attribute__ ((format (__printf__, 5, 6)));
+#else
+static void sendHTTPError (WiFiClient &client, const char *fmt, ...);
+static void demoMsg (bool ok, int n, char buf[], size_t buf_len, const char *fmt, ...);
+#endif
+
+
+
 // persistent server listening for restful connections
 static WiFiServer *restful_server;
 int restful_port = RESTFUL_PORT;
@@ -51,17 +62,17 @@ typedef enum {
     DEMO_NCDXF,
 
     // 10
-    DEMO_VOACAP,
     DEMO_CALLFG,
     DEMO_CALLBG,
     DEMO_DEFMT,
     DEMO_ONAIR,
+    DEMO_SAT,
 
     // 15
-    DEMO_SAT,
     DEMO_EME,
     DEMO_AUXTIME,
     DEMO_PSKMASK,
+    DEMO_PANE0,
 
     DEMO_N,
 
@@ -70,14 +81,6 @@ static bool runDemoChoice (DemoChoice choice, bool &slow, char msg[], size_t msg
 
 // hack around frame buffer readback weirdness that requires ignoring the very first pixel
 static bool first_pixel = true;
-
-#if defined(__GNUC__)
-static void demoMsg (bool ok, int n, char buf[], size_t buf_len, const char *fmt, ...)
-        __attribute__ ((format (__printf__, 5, 6)));
-#else
-static void demoMsg (bool ok, int n, char buf[], size_t buf_len, const char *fmt, ...);
-#endif
-
 
 // some color names culled from rgb.txt
 typedef struct {
@@ -165,31 +168,6 @@ static void printColorNames (WiFiClient &client)
         client.println (FPSTR(cnames[i].name));
 }
 
-/* remove leading and trailing white space IN PLACE, return str.
- */
-char *trim (char *str)
-{
-    if (!str)
-        return (str);
-
-    // skip leading blanks
-    char *blank = str;
-    while (isspace(*blank))
-        blank++;
-
-    // copy from first-nonblank back to beginning
-    size_t sl = strlen (blank);
-    if (blank > str)
-        memmove (str, blank, sl+1);             // include \0
-
-    // skip back from over trailing blanks
-    while (sl > 0 && isspace(str[sl-1]))
-        str[--sl] = '\0';
-
-    // return same starting point
-    return (str);
-}
-
 static bool rgbOk (int r, int g, int b)
 {
     return (r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255);
@@ -272,27 +250,27 @@ bool parseWebCommand (WebArgs &wa, char line[], size_t line_len)
                 state = PWC_LOOKING_4_VALUE;                    // now look for value
             } else if (*line == '&') {
                 *line = '\0';                                   // terminate name
-                if (!setWCValue (wa, trim(name), NULL, line0, line_len))
+                if (!setWCValue (wa, strtrim(name), NULL, line0, line_len))
                     return (false);
                 name = line + 1;                                // start next name
                 value = NULL;                                   // no value yet
             } else if (*line == '\0') {
                 if (name[0] == '\0')
                     return (true);                              // no name at all is ok
-                return (setWCValue (wa, trim(name), trim(value), line0, line_len));
+                return (setWCValue (wa, strtrim(name), strtrim(value), line0, line_len));
             }
             break;
 
         case PWC_LOOKING_4_VALUE:
             if (*line == '&') {
                 *line = '\0';                                   // terminate value
-                if (!setWCValue (wa, trim(name), trim(value), line0, line_len))
+                if (!setWCValue (wa, strtrim(name), strtrim(value), line0, line_len))
                     return (false);
                 name = line + 1;                                // start next name
                 value = NULL;                                   // no value yet
                 state = PWC_LOOKING_4_NAME;                     // now look for name
             } else if (*line == '\0') {
-                return (setWCValue (wa, trim(name), trim(value), line0, line_len));
+                return (setWCValue (wa, strtrim(name), strtrim(value), line0, line_len));
             }
             break;
         }
@@ -367,7 +345,7 @@ static bool replaceEncoding (char *from)
 
 /* send initial response indicating body will be plain text
  */
-void startPlainText (WiFiClient &client)
+static void startPlainText (WiFiClient &client)
 {
     resetWatchdog();
 
@@ -382,7 +360,7 @@ void startPlainText (WiFiClient &client)
 /* send the given message as HTTP error 400 Bad request.
  * N.B. we expect the resulting message to include a final newline.
  */
-void sendHTTPError (WiFiClient &client, const char *fmt, ...)
+static void sendHTTPError (WiFiClient &client, const char *fmt, ...)
 {
     resetWatchdog();
 
@@ -414,31 +392,35 @@ static void reportPaneChoices (WiFiClient &client, PlotPane pp)
 {
     // which pane
     char buf[100];
-    snprintf (buf, sizeof(buf), "Pane%d     ", (int)pp+1);
+    snprintf (buf, sizeof(buf), _FX("Pane%d    "), (int)pp);
     client.print(buf);
 
-    // always start with current then any others in rotset
+    // current choice
     PlotChoice pc_now = plot_ch[pp];
-    client.print(plot_names[pc_now]);
-    if (pc_now == PLOT_CH_BC) {
-        snprintf (buf, sizeof(buf), _FX("/%dW"), bc_power);
-        client.print(buf);
-    }
-    if (paneIsRotating(pp)) {
-        time_t t0 = myNow();
-        PlotChoice pc_next = pc_now;
-        while ((pc_next = getNextRotationChoice (pp, pc_next)) != pc_now) {
-            size_t l = snprintf (buf, sizeof(buf), ",%s", plot_names[pc_next]);
-            if (pc_next == PLOT_CH_BC)
-                snprintf (buf+l, sizeof(buf)-l, _FX("/%dW"), bc_power);
-            client.print(buf);
+
+    // print rotset, flagging current
+    if (pc_now == PLOT_CH_NONE) {                               // possible in PANE_0
+        client.println(F(" off"));
+    } else {
+        // list current first then any others in rotset
+        snprintf (buf, sizeof(buf), _FX(" %s"), plot_names[pc_now]);
+        client.print (buf);
+        for (int i = 0; i < PLOT_CH_N; i++) {
+            if (i != pc_now && plot_rotset[pp] & (1<<i)) {
+                snprintf (buf, sizeof(buf), _FX(" %s"), plot_names[i]);
+                client.print (buf);
+            }
         }
-        time_t sleft = nextPaneRotation(pp) - t0;
-        if (sleft >= 0)         // count be << 0 if just scheduled
-            snprintf (buf, sizeof(buf), _FX(" rotating in %02lld:%02lld"), sleft/60LL, sleft%60LL);
-        client.print(buf);
+
+        // show next rotation, if any
+        if (paneIsRotating(pp)) {
+            snprintf (buf, sizeof(buf), _FX(" rotating in %ld seconds"), next_update[pp] - myNow());
+            client.print (buf);
+        }
+
+        // done
+        client.println();
     }
-    client.println();
 }
 
 /* format the current stopwatch state into buf
@@ -575,16 +557,6 @@ static bool getWiFiCaptureBMP(WiFiClient &client, char *unused_line, size_t line
         bufl += 2;
 
         if (bufl == sizeof(buf) || i == npix-1) {
-
-            #if defined (_IS_ESP8266)
-                // ESP outgoing data can deadlock if incoming buffer fills, so freshen any pending arrivals.
-                if (isDXClusterConnected()) {
-                    PlotPane pp = findPaneChoiceNow (PLOT_CH_DXCLUSTER);
-                    if (pp != PANE_NONE)
-                        updateDXCluster(plot_b[pp]);
-                }
-            #endif
-
             client.write ((uint8_t*)buf, bufl);
             bufl = 0;
             resetWatchdog();
@@ -806,42 +778,34 @@ static bool getWiFiDXInfo (WiFiClient &client, char line[], size_t line_len)
     return (getWiFiDEDXInfo_helper (client, line, line_len, true));
 }
 
-/* helper to print list of DXClusterSpot.
+/* helper to print list of tx DXSpot.
  */
-static void spotsHelper (WiFiClient &client, const DXClusterSpot *spots, int nspots, char *buf, int buf_len)
+static void spotsHelper (WiFiClient &client, const DXSpot *spots, int nspots, char *buf, int buf_len)
 {
     // print each row
     FWIFIPR (client, F("#  kHz   Call        UTC     Mode Grid      Lat     Lng     DEDist   DEBearing\n"));
     for (uint8_t i = 0; i < nspots; i++) {
 
-        const DXClusterSpot &spot = spots[i];
+        const DXSpot &spot = spots[i];
 
         // start with pretty freq, fixed 8 chars
         const char *f_fmt = spot.kHz < 1e6 ? "%8.1f" : "%8.0f";
         int bufl = snprintf (buf, buf_len, f_fmt, spot.kHz);
 
         // distance and bearing from DE
-        LatLong to_ll;
-        to_ll.lat = spot.dx_lat;
-        to_ll.lat_d = rad2deg(to_ll.lat);
-        to_ll.lng = spot.dx_lng;
-        to_ll.lng_d = rad2deg(to_ll.lng);
         float dist, bear;
-        propDEPath (show_lp, to_ll, &dist, &bear);
+        propDEPath (show_lp, spot.tx_ll, &dist, &bear);
         dist *= ERAD_M;                                 // angle to miles
         bear *= 180/M_PIF;                              // rad -> degrees
         bool bear_ismag = desiredBearing (de_ll, bear);
         if (useMetricUnits())
             dist *= KM_PER_MI;
 
-        // grid
-        char grid[MAID_CHARLEN];
-        ll2maidenhead (grid, to_ll);
-
         // add remaining fields
         snprintf (buf+bufl, buf_len-bufl, _FX(" %-*s %02d%02d %7s %6s %7.2f %7.2f   %6.0f   %4.0f %s\n"),
-                MAX_SPOTCALL_LEN-1, spot.dx_call, hour(spot.spotted), minute(spot.spotted), spot.mode,
-                grid, to_ll.lat_d, to_ll.lng_d, dist, bear, bear_ismag ? _FX("magnetic") : _FX("true"));
+                MAX_SPOTCALL_LEN-1, spot.tx_call, hour(spot.spotted), minute(spot.spotted), spot.mode,
+                spot.tx_grid, spot.tx_ll.lat_d, spot.tx_ll.lng_d, dist, bear,
+                bear_ismag ? _FX("magnetic") : _FX("true"));
 
         // print
         client.print(buf);
@@ -857,7 +821,7 @@ static bool getWiFiDXSpots (WiFiClient &client, char line[], size_t line_len)
     startPlainText (client);
 
     // retrieve spots, if available
-    DXClusterSpot *spots;
+    DXSpot *spots;
     uint8_t nspots;
     if (!getDXClusterSpots (&spots, &nspots)) {
         strcpy (line, _FX("No dx spots"));
@@ -879,7 +843,7 @@ static bool getWiFiOnTheAir (WiFiClient &client, char line[], size_t line_len)
     startPlainText (client);
 
     // retrieve and show each list, if any
-    DXClusterSpot *spots;
+    DXSpot *spots;
     uint8_t nspots;
     bool any = false;
     for (int i = 0; i < ONTA_N; i++) {
@@ -923,7 +887,7 @@ static bool getWiFiLiveStats (WiFiClient &client, char *line, size_t line_len)
     for (int i = 0; i < PSKBAND_N; i++) {
         PSKBandStats &s = stats[i];
         snprintf (buf, sizeof(buf), _FX("%-6s %5d %5.0f %7.2f %7.2f\n"), names[i], s.count,
-                useMetricUnits() ? s.maxkm : s.maxkm / KM_PER_MI, rad2deg(s.maxlat), rad2deg(s.maxlng));
+                useMetricUnits() ? s.maxkm : s.maxkm / KM_PER_MI, s.maxll.lat_d, s.maxll.lng_d);
         client.print(buf);
     }
 
@@ -938,8 +902,9 @@ static bool getWiFiContests (WiFiClient &client, char *unused_line, size_t line_
     (void)(unused_line);
     (void)(line_len);
 
-    char *credp, **conpp;
-    int n_con = getContests (&credp, &conpp);
+    const char *credp;
+    const ContestEntry *cep;
+    int n_con = getContests (&credp, &cep);
 
     // start reply
     startPlainText (client);
@@ -947,8 +912,12 @@ static bool getWiFiContests (WiFiClient &client, char *unused_line, size_t line_
     if (n_con > 0) {
         FWIFIPR (client, F("# "));
         client.println (credp);
-        for (int i = 0; i < n_con; i++)
-            client.println (conpp[i]);
+        for (int i = 0; i < n_con; i++) {
+            const ContestEntry &ce = cep[i];
+            client.println (ce.title);
+            client.println (ce.date_str);
+            client.println (ce.url);
+        }
     } else {
         client.print (F("no contests until pane opened\n"));
     }
@@ -999,7 +968,7 @@ static bool getWiFiConfig (WiFiClient &client, char *unused_line, size_t line_le
     client.print(buf);
 
     // report panes
-    for (int pp = 0; pp < PANE_N; pp++)
+    for (int pp = PANE_0; pp < PANE_N; pp++)
         reportPaneChoices (client, (PlotPane)pp);
 
     // report psk if active
@@ -1022,16 +991,15 @@ static bool getWiFiConfig (WiFiClient &client, char *unused_line, size_t line_le
         int j = (brb_mode + i) % BRB_N; // start list with current
         if (brb_rotset & (1 << j)) {
             if (j != brb_mode)
-                FWIFIPR (client, F(","));
+                FWIFIPR (client, F(", "));
             client.print(brb_names[j]);
         }
     }
-    if (BRBIsRotating()) {
-        int sleft = brb_updateT - myNow();
-        snprintf (buf, sizeof(buf), _FX(" rotating in %02d:%02d\n"), sleft/60, sleft%60);
-    } else
-        strcpy (buf, "\n");
-    client.print (buf);
+    if (BRBIsRotating())
+        snprintf (buf, sizeof(buf), _FX(" rotating in %ld seconds"),  brb_updateT - myNow());
+    else
+        buf[0] = '\0';
+    client.println (buf);
 
     // report display brightness and timers
     uint16_t pcon, t_idle, t_idle_left;
@@ -1076,23 +1044,44 @@ static bool getWiFiConfig (WiFiClient &client, char *unused_line, size_t line_le
         FWIFIPRLN (client, not_sup);
 
 
-    // report alarm
+    // report daily alarm
     FWIFIPR (client, F("Alarm     "));
-    AlarmState as;
-    uint16_t hr, mn;
-    getAlarmState (as, hr, mn);
-    switch (as) {
+    AlarmState d_as;
+    uint16_t d_dehr, d_demn;
+    getDailyAlarmState (d_as, d_dehr, d_demn);
+    switch (d_as) {
     case ALMS_OFF:
-        snprintf (buf, sizeof(buf), _FX("Off (%02d:%02d)\n"), hr, mn);
+        snprintf (buf, sizeof(buf), _FX("Off (DE %02d:%02d)\n"), d_dehr, d_demn);
         break;
     case ALMS_ARMED:
-        snprintf (buf, sizeof(buf), _FX("Armed for %02d:%02d\n"), hr, mn);
+        snprintf (buf, sizeof(buf), _FX("Armed for DE %02d:%02d\n"), d_dehr, d_demn);
         break;
     case ALMS_RINGING:
-        snprintf (buf, sizeof(buf), _FX("Ringing since %02d:%02d\n"), hr, mn);
+        snprintf (buf, sizeof(buf), _FX("Ringing since DE %02d:%02d\n"), d_dehr, d_demn);
         break;
     }
     client.print (buf);
+
+    // report once-only alarm
+    FWIFIPR (client, F("One Alarm "));
+    AlarmState wo_as;
+    time_t wo_t;
+    bool wo_utc;
+    char wo_str[50];
+    getOneTimeAlarmState (wo_as, wo_t, wo_utc, wo_str, sizeof(wo_str));
+    switch (wo_as) {
+    case ALMS_OFF:
+        snprintf (buf, sizeof(buf), _FX("Off (%s)\n"), wo_str);
+        break;
+    case ALMS_ARMED:
+        snprintf (buf, sizeof(buf), _FX("Armed for %s\n"), wo_str);
+        break;
+    case ALMS_RINGING:
+        snprintf (buf, sizeof(buf), _FX("Ringing since %s\n"), wo_str);
+        break;
+    }
+    client.print (buf);
+
 
 
     // report stopwatch
@@ -1436,21 +1425,6 @@ static bool getWiFiSensorData (WiFiClient &client, char line[], size_t line_len)
     return (true);
 }
 
-/* given age in seconds, set string to short approx description.
- */
-static char *ageStr (long secs, char *str, size_t str_len)
-{
-    if (secs < 60)
-        snprintf (str, str_len, _FX("%2ld secs"), secs);
-    else if (secs < 3600)
-        snprintf (str, str_len, _FX("%2ld mins"), secs/60);
-    else if (secs < 24*3600)
-        snprintf (str, str_len, _FX("%2ld hrs"), secs/3600);
-    else 
-        snprintf (str, str_len, _FX("1+ days"));
-    return (str);
-}
-
 /* send the current space weather stats to client
  */
 static bool getWiFiSpaceWx (WiFiClient &client, char *unused_line, size_t line_len)
@@ -1461,58 +1435,78 @@ static bool getWiFiSpaceWx (WiFiClient &client, char *unused_line, size_t line_l
     // send html header
     startPlainText(client);
 
-    // collect info
-    SPWxValue ssn, flux, kp, swind, drap, bz, bt;
-    NOAASpaceWx noaaspw;
-    float path[BMTRX_COLS];
-    char xray[10];
-    time_t noaaspw_age, xray_age, path_age;
-    getSpaceWeather (ssn, flux, kp, swind, drap, bz, bt, noaaspw, noaaspw_age, xray, xray_age, path,path_age);
-
-    // send values and ages
+    // send fresh values
+    (void) checkForNewSpaceWx();
     char buf[100];
-    char age[30];
+    char xray_str[10];
 
-    client.print (F(" Datum     Value      Age\n"));
-    client.print (F("-------- ---------  -------\n"));
+    client.print (F(" Datum     Value\n"));
+    client.print (F("-------- ---------\n"));
 
-    snprintf (buf, sizeof(buf), _FX("SSN      %9.1f  %s\n"), ssn.value, ageStr(ssn.age, age, sizeof(age)));
-    client.print (buf);
-
-    snprintf (buf, sizeof(buf), _FX("KP        %8.0f  %s\n"), kp.value, ageStr(kp.age, age, sizeof(age)));
-    client.print (buf);
-
-    snprintf (buf, sizeof(buf), _FX("FLUX     %9.1f  %s\n"), flux.value, ageStr(flux.age, age, sizeof(age)));
-    client.print (buf);
-
-    snprintf (buf, sizeof(buf), _FX("XRAY      %8s  %s\n"), xray, ageStr(xray_age, age, sizeof(age)));
-    client.print (buf);
-
-    snprintf (buf, sizeof(buf), _FX("SOLWIND   %8.1f  %s\n"), swind.value, ageStr(swind.age,age,sizeof(age)));
-    client.print (buf);
-
-    snprintf (buf, sizeof(buf), _FX("DRAP      %8.1f  %s\n"), drap.value, ageStr(drap.age, age, sizeof(age)));
-    client.print (buf);
-
-    snprintf (buf, sizeof(buf), _FX("Bz        %8.1f  %s\n"), bz.value, ageStr(bz.age, age, sizeof(age)));
-    client.print (buf);
-
-    snprintf (buf, sizeof(buf), _FX("Bt        %8.1f  %s\n"), bt.value, ageStr(bt.age, age, sizeof(age)));
-    client.print (buf);
-
-    for (int i = 0; i < BMTRX_COLS; i++) {
-        int band = propMap2Band ((PropMapBand)i);
-        // match format in plotBandConditions()
-        snprintf (buf, sizeof(buf), _FX("DEDX_%02dm  %8.0f  %s\n"), band, 99*path[i],
-                                ageStr(path_age, age, sizeof(age)));
+    if (space_wx[SPCWX_SSN].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("SSN      %9.1f\n"), space_wx[SPCWX_SSN].value);
         client.print (buf);
     }
 
-    for (int i = 0; i < N_NOAASW_C; i++) {
-        for (int j = 0; j < N_NOAASW_V; j++) {
-            snprintf (buf, sizeof(buf), _FX("NSPW_%c%d   %8d  %s\n"), noaaspw.cat[i], j, noaaspw.val[i][j],
-                    ageStr(noaaspw_age, age, sizeof(age)));
+    if (space_wx[SPCWX_KP].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("KP        %8.1f\n"), space_wx[SPCWX_KP].value);
+        client.print (buf);
+    }
+
+    if (space_wx[SPCWX_FLUX].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("FLUX     %9.1f\n"), space_wx[SPCWX_FLUX].value);
+        client.print (buf);
+    }
+
+    if (space_wx[SPCWX_XRAY].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("XRAY      %8s\n"), xrayLevel(xray_str, space_wx[SPCWX_XRAY]));
+        client.print (buf);
+    }
+
+    if (space_wx[SPCWX_SOLWIND].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("SOLWIND   %8.1f\n"), space_wx[SPCWX_SOLWIND].value);
+        client.print (buf);
+    }
+
+    if (space_wx[SPCWX_DRAP].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("DRAP      %8.1f\n"), space_wx[SPCWX_DRAP].value);
+        client.print (buf);
+    }
+
+    if (space_wx[SPCWX_BZ].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("Bz        %8.1f\n"), space_wx[SPCWX_BZ].value);
+        client.print (buf);
+    }
+
+    if (space_wx[SPCWX_NOAASPW].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("NOAA      %8.0f\n"), space_wx[SPCWX_NOAASPW].value);
+        client.print (buf);
+    }
+
+    if (space_wx[SPCWX_AURORA].value_ok) {
+        snprintf (buf, sizeof(buf), _FX("Aurora    %8.0f\n"), space_wx[SPCWX_AURORA].value);
+        client.print (buf);
+    }
+
+
+    // show path reliability for the current hour
+    if (bc_matrix.ok) {
+        int hr = hour(myNow());
+        for (int i = BMTRX_COLS; --i >= 0; ) {
+            int band = propMap2Band ((PropMapBand)i);
+            snprintf (buf, sizeof(buf), _FX("DEDX_%02dm  %8d\n"), band, bc_matrix.m[hr][i]);
             client.print (buf);
+        }
+    }
+
+    // show NOAA conditions formatted similar to PLOT_CH_NOAASPW
+    NOAASpaceWxData noaasw;
+    if (retrieveNOAASWx (noaasw) && noaasw.data_ok) {
+        for (int i = 0; i < N_NOAASW_C; i++) {
+            size_t bl = snprintf (buf, sizeof(buf), _FX("NSPW_%c    "), noaasw.cat[i]);
+            for (int j = 0; j < N_NOAASW_V; j++)
+                bl += snprintf (buf+bl, sizeof(buf)-bl, _FX(" %d"), noaasw.val[i][j]);
+            client.println (buf);
         }
     }
 
@@ -1543,29 +1537,11 @@ static bool getWiFiSys (WiFiClient &client, char *unused_line, size_t line_len)
     FWIFIPR (client, F("Version  ")); client.println (hc_version);
     snprintf (buf, sizeof(buf), _FX("BuildSz  %d x %d\n"), BUILD_W, BUILD_H); client.print(buf);
     FWIFIPR (client, F("MaxStack ")); client.println (worst_stack);
-    FWIFIPR (client, F("MaxWDDT  ")); client.println (max_wd_dt);
     FWIFIPR (client, F("Platform ")); client.println (platform);
     FWIFIPR (client, F("BEHost   ")); client.println (backend_host);
     FWIFIPR (client, F("BEPort   ")); client.println (backend_port);
     FWIFIPR (client, F("MACaddr  ")); client.println (WiFi.macAddress().c_str());
     FWIFIPR (client, F("S/N      ")); client.println (ESP.getChipId());
-#if defined(_IS_ESP8266)
-    FWIFIPR (client, F("MinHeap  ")); client.println (worst_heap);
-    FWIFIPR (client, F("FreeNow  ")); client.println (ESP.getFreeHeap());
-    FWIFIPR (client, F("MaxBlock ")); client.println (ESP.getMaxFreeBlockSize());
-    FWIFIPR (client, F("HeapFrag ")); client.println (ESP.getHeapFragmentation());
-    FWIFIPR (client, F("SketchSz ")); client.println (ESP.getSketchSize());
-    FWIFIPR (client, F("FreeSkSz ")); client.println (ESP.getFreeSketchSpace());
-    FWIFIPR (client, F("FlashSiz ")); client.println (ESP.getFlashChipRealSize());
-    FWIFIPR (client, F("CPUMHz   ")); client.println (ESP.getCpuFreqMHz());
-    FWIFIPR (client, F("CoreVer  ")); client.println (ESP.getCoreVersion());
-    // #if defined __has_include                        should work but doesn't
-        // #if __has_include (<lwip-git-hash.h>)        should work but doesn't either
-            // #include <lwip-git-hash.h>
-            // FWIFIPR (client, F("lwipVer  ")); client.println (LWIP_HASH_STR);
-        // #endif
-    // #endif
-#endif
 
     // show EEPROM used
     uint16_t ee_used, ee_size;
@@ -1621,15 +1597,14 @@ static bool getWiFiSys (WiFiClient &client, char *unused_line, size_t line_len)
     return (true);
 }
 
-/* report the current VOACAP Band Conditions matrix, if not too old
+/* report the current VOACAP Band Conditions matrix
  */
 static bool getWiFiVOACAP (WiFiClient &client, char *line, size_t line_len)
 {
-    // bm is a matrix of 24 rows of UTC 0 .. 23, 8 columns of bands 80-40-30-20-17-15-12-10.
-    BandCdtnMatrix bm;
-    if (!getBCMatrix (bm)) {
-        (void) snprintf (line, line_len, _FX("not available"));
-        return(false);
+    // bale if not valid
+    if (!bc_matrix.ok) {
+        (void) snprintf (line, line_len, _FX("VOACAP data not valid"));
+        return (false);
     }
 
     // send html header
@@ -1655,8 +1630,8 @@ static bool getWiFiVOACAP (WiFiClient &client, char *line, size_t line_len)
             // shift so current time is first column
             int m_row = (p_col + utc_hour_now + 48) % 24;
 
-            // get reliability
-            uint8_t rel = bm[m_row][m_col];
+            // bc_matrix is a matrix of 24 rows of UTC 0 .. 23, 8 columns of bands 80-40-30-20-17-15-12-10.
+            uint8_t rel = bc_matrix.m[m_row][m_col];
 
             buf_l += snprintf (buf+buf_l, sizeof(buf)-buf_l, _FX("%3d"), rel);
         }
@@ -1983,7 +1958,7 @@ static bool setWiFiCluster (WiFiClient &client, char line[], size_t line_len)
 
     // handy
     char *host = (char*) wa.value[0];   // setDXCluster will trim
-    const char *port = wa.value[1];
+    char *port = (char*) wa.value[1];   // setDXCluster will trim
 
     // try to save
     if (!setDXCluster (host, port, line))
@@ -2006,7 +1981,7 @@ static bool setWiFiCluster (WiFiClient &client, char line[], size_t line_len)
 }
 
 
-/* remote command to set up alarm clock
+/* remote command to set up daily alarm clock
  *   state=off|armed&time=HR:MN
  */
 static bool setWiFiAlarm (WiFiClient &client, char line[], size_t line_len)
@@ -2028,7 +2003,7 @@ static bool setWiFiAlarm (WiFiClient &client, char line[], size_t line_len)
     // get current state
     AlarmState as;
     uint16_t hr16, mn16;
-    getAlarmState (as, hr16, mn16);
+    getDailyAlarmState (as, hr16, mn16);
 
     // crack new state
     if (state) {
@@ -2048,7 +2023,7 @@ static bool setWiFiAlarm (WiFiClient &client, char line[], size_t line_len)
     // crack new time spec if given
     if (timespec) {
         if (as == ALMS_OFF) {
-            strcpy (line, _FX("can set time only if armed"));
+            strcpy (line, _FX("may set time only if armed"));
             return(false);
         }
         int hr = 0, mn = 0;
@@ -2061,20 +2036,104 @@ static bool setWiFiAlarm (WiFiClient &client, char line[], size_t line_len)
     }
 
     // engage
-    setAlarmState (as, hr16, mn16);
+    setDailyAlarmState (as, hr16, mn16);
 
     // ack
     startPlainText (client);
     if (as == ALMS_OFF)
         client.print (_FX("alarm off\n"));
     else {
-        char buf[30];
+        char buf[50];
         snprintf (buf, sizeof(buf), _FX("armed at %02d:%02d\n"), hr16, mn16);
         client.print (buf);
     }
 
     return (true);
 }
+
+/* remote command to set the once-only alarm
+ *  state=off|armed&time=YYYY-MM-DDTHR:MN&tz=DE|UTC
+ */
+static bool setWiFiOnceAlarm (WiFiClient &client, char line[], size_t line_len)
+{
+    // define all possible args
+    WebArgs wa;
+    wa.nargs = 0;
+    wa.name[wa.nargs++] = "state";
+    wa.name[wa.nargs++] = "time";
+    wa.name[wa.nargs++] = "tz";
+
+    // parse
+    if (!parseWebCommand (wa, line, line_len))
+        return (false);
+
+    // handy
+    const char *state = wa.value[0];
+    const char *timespec = wa.value[1];
+    const char *tz = wa.value[2];
+
+    // get current state
+    AlarmState as;
+    time_t a_t;
+    bool utc;
+    char str[50];
+    getOneTimeAlarmState (as, a_t, utc, str, sizeof(str));
+
+    // crack new state
+    if (state) {
+        if (strcmp (state, _FX("off")) == 0)
+            as = ALMS_OFF;
+        else if (strcmp (state, _FX("armed")) == 0)
+            as = ALMS_ARMED;
+        else {
+            strcpy (line, _FX("unknown state"));
+            return (false);
+        }
+    } else {
+        strcpy (line, _FX("state is required"));
+        return (false);
+    }
+
+    // crack tz if given
+    if (tz) {
+        if (strcmp (tz, "DE") == 0)
+            utc = false;
+        else if (strcmp (tz, "UTC") == 0)
+            utc = true;
+        else {
+            strcpy (line, _FX("unknown tz"));
+            return (false);
+        }
+    }
+
+    // use new time spec if given
+    if (timespec) {
+        if (as == ALMS_OFF) {
+            strcpy (line, _FX("may set time only if armed"));
+            return(false);
+        }
+        snprintf (str, sizeof(str), "%s", timespec);
+    }
+
+    // engage
+    if (!setOneTimeAlarmState (as, utc, str)) {
+        strcpy (line, _FX("time garbled or too old"));
+        return (false);
+    }
+
+    // ack
+    startPlainText (client);
+    if (as == ALMS_OFF)
+        FWIFIPRLN (client, F("alarm off"));
+    else {
+        FWIFIPR (client, F("armed for "));
+        client.print (utc ? _FX("UTC ") : _FX("DE "));
+        FWIFIPRLN (client, str);
+    }
+
+    return (true);
+}
+
 
 /* remote command to set the aux time format
  */
@@ -2394,9 +2453,9 @@ static bool setWiFiNewDEDX_helper (WiFiClient &client, bool new_dx, char line[],
             de_tz.tz_secs = atof(tz)*3600;        // hours to seconds
             NVWriteInt32 (NV_DE_TZ, de_tz.tz_secs);
             drawTZ (de_tz);
-            scheduleNewMoon();
-            scheduleNewSDO();
-            scheduleNewBC();
+            scheduleNewPlot(PLOT_CH_MOON);
+            scheduleNewPlot(PLOT_CH_SDO);
+            scheduleNewPlot(PLOT_CH_BC);
             drawDEInfo();
         }
     }
@@ -2480,10 +2539,10 @@ static bool setWiFiMapColor (WiFiClient &client, char line[], size_t line_len)
     initEarthMap();
 
     // update panes that use band colors -- they know whether they are really in use
-    scheduleNewPSK();
-    scheduleNewDXC();
-    scheduleNewPOTA();
-    scheduleNewSOTA();
+    scheduleNewPlot(PLOT_CH_PSK);
+    scheduleNewPlot(PLOT_CH_DXCLUSTER);
+    scheduleNewPlot(PLOT_CH_POTA);
+    scheduleNewPlot(PLOT_CH_SOTA);
     if (brb_mode == BRB_SHOW_BEACONS)
         (void) drawNCDXFBox();
 
@@ -2773,6 +2832,7 @@ static bool setWiFiADIF (WiFiClient &client, char line[], size_t line_len)
     wa.nargs = 0;
     wa.name[wa.nargs++] = "file";
     wa.name[wa.nargs++] = "none";
+    wa.name[wa.nargs++] = "pane";
 
     // parse
     if (!parseWebCommand (wa, line, line_len))
@@ -2784,20 +2844,28 @@ static bool setWiFiADIF (WiFiClient &client, char line[], size_t line_len)
 
     if (found_file) {
 
+        // pane arg
+        int pane = wa.found[2] ? atoi(wa.value[2]) : PANE_3;
+        if (pane < PANE_0 || pane >= PANE_N) {
+            strcpy (line, _FX("Bad pane num"));
+            return (false);
+        }
+        PlotPane pp = (PlotPane)pane;
+
         // POST content immediately follows header
         int n = readADIFWiFiClient (client, content_length, line, line_len);
         if (n < 0) {
-            scheduleNewADIF();
+            scheduleNewPlot(PLOT_CH_ADIF);
             return (false);                     // line[] already filled with error message
         }
 
-        // nice to put ADIF pane up somewhere
-        if (setPlotChoice (PANE_3, PLOT_CH_ADIF))
-            plot_rotset[PANE_3] |= (1 << PLOT_CH_ADIF);
+        // nice to put ADIF pane up too
+        if (findPaneForChoice(PLOT_CH_ADIF) == PANE_NONE && setPlotChoice (pp, PLOT_CH_ADIF))
+            plot_rotset[pane] |= (1 << PLOT_CH_ADIF);
 
         // tell adif new spots are from us and refresh
         from_set_adif = true;
-        scheduleNewADIF();
+        scheduleNewPlot(PLOT_CH_ADIF);
 
         // reply count
         startPlainText (client);
@@ -2814,7 +2882,7 @@ static bool setWiFiADIF (WiFiClient &client, char line[], size_t line_len)
 
             // tell adif to use file and refresh
             from_set_adif = false;
-            scheduleNewADIF();
+            scheduleNewPlot(PLOT_CH_ADIF);
 
             // ack
             startPlainText (client);
@@ -2834,6 +2902,157 @@ static bool setWiFiADIF (WiFiClient &client, char line[], size_t line_len)
     }
 }
 
+/* load a BMP file via POST or turn off.
+ */
+static bool setWiFiloadBMP (WiFiClient &client, char line[], size_t line_len)
+{
+    // define all possible args
+    WebArgs wa;
+    wa.nargs = 0;
+    wa.name[wa.nargs++] = "file";
+    wa.name[wa.nargs++] = "none";
+    wa.name[wa.nargs++] = "pane";
+
+    // parse
+    if (!parseWebCommand (wa, line, line_len))
+        return (false);
+
+    // check which
+    bool found_file = wa.found[0] && wa.value[0] == NULL;       // no arg
+    bool found_none = wa.found[1] && wa.value[1] == NULL;       // no arg
+
+    // pane arg is required
+    if (!wa.found[2] || !wa.value[2]) {
+        snprintf (line, line_len, _FX("pane is required"));
+        return(false);
+    }
+    int pane = atoi(wa.value[2]);
+    if (pane < PANE_1 || pane >= PANE_N) {
+        strcpy (line, _FX("Bad pane num"));
+        return (false);
+    }
+
+    if (found_file) {
+
+        // POST content immediately follows header
+        if (!installBMP (client, plot_b[pane], line, line_len))
+            return (false);             // error already in line[]
+
+    } else if (found_none) {
+
+        // restore pane
+        scheduleNewPlot(plot_ch[pane]);
+
+    } else {
+        strcpy_P (line, garbcmd);
+        return (false);
+    }
+
+    // ack
+    startPlainText (client);
+    client.print ("ok\n");
+    return (true);
+}
+
+/*  set desire pan and/or zoom, allow either abs or diff panning.
+ *    pan_x=X&pan_y=Y&pan_dx=dX&pan_dy=dY&zoom=Z" },
+ */
+static bool setWiFiPanZoom (WiFiClient &client, char line[], size_t line_len)
+{
+    // define all possible args
+    WebArgs wa;
+    wa.nargs = 0;
+    wa.name[wa.nargs++] = "pan_x";              // 0
+    wa.name[wa.nargs++] = "pan_y";              // 1
+    wa.name[wa.nargs++] = "pan_dx";             // 2
+    wa.name[wa.nargs++] = "pan_dy";             // 3
+    wa.name[wa.nargs++] = "zoom";               // 4
+
+    // parse
+    if (!parseWebCommand (wa, line, line_len))
+        return (false);
+
+    // get copy to update
+    PanZoom new_pz = pan_zoom;
+
+
+    // crack zoom
+    if (wa.found[4]) {
+        if (map_proj != MAPP_MERCATOR) {
+            snprintf (line, line_len, "Zooming requires Mercator projection");
+            return (false);
+        }
+        new_pz.zoom = atoi (wa.value[4]);
+    }
+
+
+    // crack x panning
+    if ((wa.found[0] || wa.found[2]) && !(map_proj == MAPP_MERCATOR || map_proj == MAPP_ROB)) {
+        snprintf (line, line_len, "Panning X requires Mercator or Robinson projection");
+        return (false);
+    }
+    if (wa.found[0] && wa.found[2]) {
+        snprintf (line, line_len, "Use only one of pan_x or pan_dx");
+        return (false);
+    }
+    if (wa.found[0])
+        new_pz.pan_x = atoi(wa.value[0]);
+    else if (wa.found[2])
+        new_pz.pan_x += atoi(wa.value[2]);
+
+
+    // crack y panning
+    if ((wa.found[1] || wa.found[3]) && map_proj != MAPP_MERCATOR) {
+        snprintf (line, line_len, "Panning Y requires Mercator projection");
+        return (false);
+    }
+    if (wa.found[1] && wa.found[3]) {
+        snprintf (line, line_len, "Use only one of pan_y or pan_dy");
+        return (false);
+    }
+    if (wa.found[1])
+        new_pz.pan_y = atoi(wa.value[1]);
+    else if (wa.found[3])
+        new_pz.pan_y += atoi(wa.value[3]);
+
+
+    // check ranges
+    if (new_pz.zoom < MIN_ZOOM || new_pz.zoom > MAX_ZOOM) {
+        snprintf (line, line_len, "Zoom must be [%d,%d]", MIN_ZOOM, MAX_ZOOM);
+        return (false);
+    }
+    if (new_pz.pan_x < MIN_PANX || new_pz.pan_x > MAX_PANX) {
+        snprintf (line, line_len, "Pan x must be [%d,%d)", MIN_PANX, MAX_PANX);
+        return (false);
+    }
+    if (new_pz.pan_y < MIN_PANY(new_pz.zoom) || new_pz.pan_y > MAX_PANY(new_pz.zoom)) {
+        snprintf (line, line_len, "Pan y must be [%d,%d]", MIN_PANY(new_pz.zoom), MAX_PANY(new_pz.zoom));
+        return (false);
+    }
+
+    // one more check
+    normalizePanZoom (new_pz);
+
+    // save and go if any change, else just report
+    if (memcmp (&pan_zoom, &new_pz, sizeof(pan_zoom))) {
+        pan_zoom = new_pz;
+        NVWriteUInt8 (NV_ZOOM, pan_zoom.zoom);
+        NVWriteInt16 (NV_PANX, pan_zoom.pan_x);
+        NVWriteInt16 (NV_PANY, pan_zoom.pan_y);
+        initEarthMap();
+        scheduleFreshMap();
+    }
+
+    // ack
+    startPlainText (client);
+    char buf[100];
+    snprintf (buf, sizeof(buf), "Pan now %d,%d zoom %dx\n", pan_zoom.pan_x, pan_zoom.pan_y, pan_zoom.zoom);
+    client.print (buf);
+    return (true);
+
+}
+
+
 /* control RSS list:
  *    reset      empty local list
  *    add=X      add 1 to local list
@@ -2848,31 +3067,32 @@ static bool setWiFiRSS (WiFiClient &client, char line[], size_t line_len)
     // define all possible args
     WebArgs wa;
     wa.nargs = 0;
-    wa.name[wa.nargs++] = "reset";
-    wa.name[wa.nargs++] = "add";
-    wa.name[wa.nargs++] = "file";
-    wa.name[wa.nargs++] = "network";
-    wa.name[wa.nargs++] = "interval";
-    wa.name[wa.nargs++] = "on";
-    wa.name[wa.nargs++] = "off";
+    wa.name[wa.nargs++] = "reset";              // 0
+    wa.name[wa.nargs++] = "add";                // 1
+    wa.name[wa.nargs++] = "file";               // 2
+    wa.name[wa.nargs++] = "network";            // 3
+    wa.name[wa.nargs++] = "interval";           // 4
+    wa.name[wa.nargs++] = "on";                 // 5
+    wa.name[wa.nargs++] = "off";                // 6
 
     // parse
     if (!parseWebCommand (wa, line, line_len))
         return (false);
 
     int n_titles, n_max;
-    char buf[150];
 
-    // check args -- full buf with suitable message
+    // send ok unless set first
+    char buf[150] = "ok\n";
+
     if (wa.found[3] && wa.value[3] == NULL) {
         // restore normal rss network queries
         (void) setRSSTitle (NULL, n_titles, n_max);
-        strcpy (buf, _FX("Restored RSS network feeds\n"));
+        snprintf (buf, sizeof(buf), "Restored RSS network feeds\n");
 
     } else if (wa.found[0] && wa.value[0] == NULL) {
         // turn off network and empty local list
         (void) setRSSTitle ("", n_titles, n_max);
-        buf[0] = '\0';                                  // use default reply
+        snprintf (buf, sizeof(buf), "List is reset\n");
 
     } else if (wa.found[1] && wa.value[1] != NULL) {
         // turn off network and add title to local list if room
@@ -2880,7 +3100,7 @@ static bool setWiFiRSS (WiFiClient &client, char line[], size_t line_len)
             snprintf (line, line_len, _FX("List is full -- max %d"), n_max);
             return (false);
         }
-        buf[0] = '\0';                                  // use default reply
+        snprintf (buf, sizeof(buf), "List now contains %d titles\n", n_titles);
 
     } else if (wa.found[2] && wa.value[2] == NULL) {
         // titles follow header
@@ -2889,10 +3109,11 @@ static bool setWiFiRSS (WiFiClient &client, char line[], size_t line_len)
         uint16_t ll = 0;                                // each line length
 
         // use content_length to avoid waiting for time out after last line
+        char line[150];
         while ((!content_length || (nr += ll+1) < content_length)
-                                && getTCPLine (client, buf, sizeof(buf), &ll))
-            (void) setRSSTitle (buf, n_titles, n_max);
-        buf[0] = '\0';                                  // use default reply
+                                && getTCPLine (client, line, sizeof(line), &ll))
+            (void) setRSSTitle (line, n_titles, n_max);
+        snprintf (buf, sizeof(buf), "List now contains %d titles\n", n_titles);
 
     } else if (wa.found[4] && wa.value[4] != NULL) {
         int new_i;
@@ -2901,7 +3122,7 @@ static bool setWiFiRSS (WiFiClient &client, char line[], size_t line_len)
             snprintf (buf, sizeof(buf), _FX("RSS interval now %d secs\n"), rss_interval);
             NVWriteUInt8 (NV_RSS_INTERVAL, rss_interval);
         } else {
-            snprintf (line, line_len, _FX("Min interval %d seconds"), RSS_MIN_INT);
+            snprintf (line, line_len, _FX("Min interval is %d seconds"), RSS_MIN_INT);
             return (false);
         }
 
@@ -2924,10 +3145,6 @@ static bool setWiFiRSS (WiFiClient &client, char line[], size_t line_len)
         return (false);
     }
 
-    // create default reply if buf empty
-    if (buf[0] == '\0')
-        snprintf (buf, sizeof(buf), _FX("Now %d of %d local titles are defined\n"), n_titles, n_max);
-
     // ack
     startPlainText (client);
     client.print (buf);
@@ -2942,109 +3159,118 @@ static bool setWiFiRSS (WiFiClient &client, char line[], size_t line_len)
  */
 static bool setWiFiPane (WiFiClient &client, char line[], size_t line_len)
 {
-    // first arg is 1-based pane number
-    int pane_1;
-    char *equals;               // 
-    if (sscanf (line, _FX("Pane%d"), &pane_1) != 1 || (equals = strchr(line,'=')) == NULL) {
+    // first arg is pane number
+    int pane;
+    char *equals;
+    if (sscanf (line, _FX("Pane%d"), &pane) != 1 || (equals = strchr(line,'=')) == NULL) {
         strcpy_P (line, garbcmd);
         return (false);
     }
-
-    // convert pane_1 to PlotPane
-    if (pane_1 < 1 || pane_1 > PANE_N) {
+    if (pane < PANE_0 || pane >= PANE_N) {
         strcpy (line, _FX("Bad pane num"));
         return (false);
     }
-    PlotPane pp = (PlotPane)(pane_1-1);
+    PlotPane pp = (PlotPane)(pane);
 
-    // convert remaining args to list of PlotChoices
-    PlotChoice pc[PLOT_CH_N];           // max size, only first n_pc in use
-    int n_pc = 0;
-    char *start = equals + 1;
-    for (char *tok = NULL; (tok = strtok (start, ",")) != NULL; start = NULL) {
+    // look for special case Pane0=off if on now
+    if (strcmp (line, _FX("Pane0=off")) == 0) {
+        if (SHOWING_PANE_0()) {
+            restoreNormPANE0();
+            startPlainText (client);
+            client.println (F("ok"));
+        } else {
+            strcpy (line, "Pane 0 is not on");
+            return (false);
+        }
+    } else {
 
-        // tok is within line, so copy it so we can use line for err msg
-        char tok_copy[30];
-        strncpy (tok_copy, tok, sizeof(tok_copy));
-        tok_copy[sizeof(tok_copy)-1] = '\0';
+        // convert remaining args to list of PlotChoices
+        PlotChoice pc[PLOT_CH_N];           // max size, only first n_pc in use
+        int n_pc = 0;
+        char *start = equals + 1;
+        for (char *tok = NULL; (tok = strtok (start, ",")) != NULL; start = NULL) {
 
-        // find tok in plot_names
-        PlotChoice tok_pc = PLOT_CH_NONE;
-        for (int i = 0; i < PLOT_CH_N; i++) {
-            if (strcmp (tok_copy, plot_names[i]) == 0) {
-                tok_pc = (PlotChoice)i;
-                break;
+            // tok is within line, so copy it so we can use line for err msg
+            char tok_copy[30];
+            strncpy (tok_copy, tok, sizeof(tok_copy));
+            tok_copy[sizeof(tok_copy)-1] = '\0';
+
+            // find tok in plot_names
+            PlotChoice tok_pc = PLOT_CH_NONE;
+            for (int i = 0; i < PLOT_CH_N; i++) {
+                if (strcmp (tok_copy, plot_names[i]) == 0) {
+                    tok_pc = (PlotChoice)i;
+                    break;
+                }
             }
+
+            // found?
+            if (tok_pc == PLOT_CH_NONE) {
+                snprintf (line, line_len, _FX("Unknown choice for pane %d: %s"), pane, tok_copy);
+                return (false);
+            }
+
+            // ok on PANE_0?
+            if (pp == PANE_0 && tok_pc != PLOT_CH_ADIF && tok_pc != PLOT_CH_CONTESTS
+                        && tok_pc != PLOT_CH_DXCLUSTER && tok_pc != PLOT_CH_POTA && tok_pc != PLOT_CH_SOTA) {
+                strcpy (line, _FX("not supported on Pane 0"));
+                return (false);
+            }
+
+            // in use elsewhere?
+            PlotPane inuse_pp = findPaneForChoice(tok_pc);
+            if (inuse_pp != PANE_NONE && inuse_pp != pp) {
+                snprintf (line, line_len, _FX("%s already set in pane %d"), tok_copy, (int)inuse_pp);
+                return (false);
+            }
+
+            // available?
+            if (!plotChoiceIsAvailable(tok_pc)) {
+                snprintf (line, line_len, _FX("%s is not available"), tok_copy);
+                return (false);
+            }
+
+            // room for more?
+            if (n_pc == PLOT_CH_N) {
+                snprintf (line, line_len, _FX("too many choices"));
+                return (false);
+            }
+
+            // ok!
+            pc[n_pc++] = tok_pc;
         }
 
-        // found?
-        if (tok_pc == PLOT_CH_NONE) {
-            snprintf (line, line_len, _FX("Unknown choice for pane %d: %s"), pane_1, tok_copy);
+        // require at least 1
+        if (n_pc == 0) {
+            snprintf (line, line_len, _FX("specify at least one choice for pane %d"), pane);
             return (false);
         }
 
-        // in use elsewhere?
-        PlotPane inuse_pp = findPaneForChoice(tok_pc);
-        if (inuse_pp != PANE_NONE && inuse_pp != pp) {
-            snprintf (line, line_len, _FX("%s already set in pane %d"), tok_copy, (int)inuse_pp+1);
-            return (false);
-        }
-        
-        // dx cluster?
-        if (tok_pc == PLOT_CH_DXCLUSTER && pp == PANE_1) {
-            snprintf (line, line_len, _FX("%s not allowed on pane 1"), tok_copy);
+        // build candidate rotset
+        uint32_t new_rotset = 0;
+        for (int i = 0; i < n_pc; i++)
+            new_rotset |= (1 << pc[i]);
+
+        // DXC must appear alone
+        if ((new_rotset & (1<<PLOT_CH_DXCLUSTER)) && (new_rotset & ~(1<<PLOT_CH_DXCLUSTER))) {
+            strcpy (line, _FX("DX Cluster must be alone"));
             return (false);
         }
 
-        // available?
-        if (!plotChoiceIsAvailable(tok_pc)) {
-            snprintf (line, line_len, _FX("%s is not available"), tok_copy);
+        // ok! engage new rotset and show first in list
+        plot_rotset[pp] = new_rotset;
+        if (!setPlotChoice (pp, pc[0])) {
+            snprintf (line, line_len, _FX("%s failed for pane %d"), plot_names[pc[0]], pane);
             return (false);
         }
 
-        // room for more?
-        if (n_pc == PLOT_CH_N) {
-            snprintf (line, line_len, _FX("too many choices"));
-            return (false);
-        }
+        // note
+        logPaneRotSet(pp, pc[0]);
 
         // ok!
-        pc[n_pc++] = tok_pc;
+        startPlainText (client);
+        reportPaneChoices (client, pp);
     }
-
-    // require at least 1
-    if (n_pc == 0) {
-        snprintf (line, line_len, _FX("specify at least one choice for pane %d"), pane_1);
-        return (false);
-    }
-
-    // build candidate rotset
-    uint32_t new_rotset = 0;
-    for (int i = 0; i < n_pc; i++)
-        new_rotset |= (1 << pc[i]);
-
-    // check ok
-    uint32_t new_sets[PANE_N];
-    memcpy (new_sets, plot_rotset, sizeof(new_sets));
-    new_sets[pp] = new_rotset;
-    if (isSatDefined() && !paneComboOk(new_sets)) {
-        snprintf (line, line_len, _FX("too many panes with satellite"));
-        return (false);
-    }
-
-    // ok! show first in list
-    plot_rotset[pp] = new_rotset;
-    if (!setPlotChoice (pp, pc[0])) {
-        snprintf (line, line_len, _FX("%s failed for pane %d"), plot_names[pc[0]], pane_1);
-        return (false);
-    }
-
-    // note
-    logPaneRotSet(pp, pc[0]);
-
-    // ok!
-    startPlainText (client);
-    reportPaneChoices (client, pp);
 
     // good
     return (true);
@@ -3227,7 +3453,8 @@ static bool setWiFiTime (WiFiClient &client, char line[], size_t line_len)
     return (true);
 }
 
-/* perform a touch screen action based on coordinates received via wifi GET
+/* perform a touch screen action based on coordinates received via wifi GET.
+ * doesn nothing if coords are within map_b.
  * return whether all ok.
  */
 static bool setWiFiTouch (WiFiClient &client, char line[], size_t line_len)
@@ -3237,7 +3464,6 @@ static bool setWiFiTouch (WiFiClient &client, char line[], size_t line_len)
     wa.nargs = 0;
     wa.name[wa.nargs++] = "x";
     wa.name[wa.nargs++] = "y";
-    wa.name[wa.nargs++] = "hold";
 
     // parse
     if (!parseWebCommand (wa, line, line_len))
@@ -3251,22 +3477,22 @@ static bool setWiFiTouch (WiFiClient &client, char line[], size_t line_len)
         return (false);
     }
 
-    // hold is optional but must be valid if given
-    int h = 0;
-    if (wa.found[2] && (!atoiOnly(wa.value[2],&h) || (h != 0 && h != 1))) {
-        strcpy (line, _FX("hold must be 0 or 1"));
+    // require x and y outside map_b
+    SCoord s = {(uint16_t)x, (uint16_t)y};
+    if (inBox (s, map_b)) {
+        snprintf (line, line_len, "touch coords must be outside the map");
         return (false);
     }
 
     // inform checkTouch() to use wifi_tt_s; it will reset
     wifi_tt_s.x = x;
     wifi_tt_s.y = y;
-    wifi_tt = h ? TT_HOLD : TT_TAP;
+    wifi_tt = TT_TAP;
 
     // ack
     startPlainText (client);
     char buf[100];
-    snprintf (buf, sizeof(buf), _FX("Touch %d %d %s\n"), x, y, h ? "hold" : "tap");
+    snprintf (buf, sizeof(buf), _FX("Web touch %d %d\n"), x, y);
     client.print(buf);
 
     // ok
@@ -3278,6 +3504,12 @@ static bool setWiFiTouch (WiFiClient &client, char line[], size_t line_len)
  */
 static bool setWiFiVOACAP (WiFiClient &client, char line[], size_t line_len)
 {
+    // bale if not valid
+    if (!bc_matrix.ok) {
+        (void) snprintf (line, line_len, _FX("VOACAP data not valid"));
+        return (false);
+    }
+
     // define all possible args
     WebArgs wa;
     wa.nargs = 0;
@@ -3405,7 +3637,7 @@ static bool setWiFiVOACAP (WiFiClient &client, char line[], size_t line_len)
         bc_utc_tl = new_utc;
         bc_toa = new_toa;
         scheduleNewVOACAPMap (new_pms);
-        scheduleNewBC();        // this will also update time line
+        scheduleNewPlot(PLOT_CH_BC);        // this will also update time line
     } else if (new_utc != bc_utc_tl) {
         // only changing timeline units
         bc_utc_tl = new_utc;
@@ -3666,7 +3898,7 @@ static bool setWiFiLiveSpots (WiFiClient &client, char line[], size_t line_len)
     psk_maxage_mins = new_age;
     psk_showdist = new_dist;
     savePSKState();
-    scheduleNewPSK();
+    scheduleNewPlot(PLOT_CH_PSK);
 
     // ack
     startPlainText (client);
@@ -3677,16 +3909,13 @@ static bool setWiFiLiveSpots (WiFiClient &client, char line[], size_t line_len)
 }
 
 
-
-
-
-#if defined(_IS_UNIX)
-
 /* report current Live Spots list, if active
  */
 static bool getWiFiLiveSpots (WiFiClient &client, char *line, size_t line_len)
 {
-    const PSKReport *rp;
+    (void)(line_len);
+
+    const DXSpot *rp;
     int n_rep;
     getPSKSpots (rp, n_rep);
     if (n_rep == 0) {
@@ -3699,16 +3928,16 @@ static bool getWiFiLiveSpots (WiFiClient &client, char *line, size_t line_len)
 
     // heading
     char buf[200];
-    snprintf (buf, sizeof(buf), "#Age,s txcall    txgrid  rxcall    rxgrid   mode      lat      lng        Hz    snr\n");
+    snprintf (buf, sizeof(buf), "#Age,s txcall    txgrid  rxcall    rxgrid   mode      lat      lng        kHz   snr\n");
     client.print(buf);
 
     // table
     long long t0 = myNow();
     for (int i = 0; i < n_rep; i++) {
-        const PSKReport &r = rp[i];
-        snprintf (buf, sizeof(buf), "%5lld  %-10s %-4s   %-10s %-4s    %-8s %6.2f  %7.2f  %9ld %d\n",
-            t0-r.posting, r.txcall, r.txgrid,  r.rxcall,  r.rxgrid, r.mode, r.dx_ll.lat_d, r.dx_ll.lng_d, 
-            r.Hz, r.snr);
+        const DXSpot &r = rp[i];
+        snprintf (buf, sizeof(buf), "%5lld  %-10s %-4.4s   %-10s %-4.4s    %-8s %6.2f  %7.2f  %9.3f %5.1f\n",
+            t0-r.spotted, r.tx_call, r.tx_grid,  r.rx_call,  r.rx_grid, r.mode, r.tx_ll.lat_d, r.tx_ll.lng_d, 
+            r.kHz, r.snr);
         client.print(buf);
     }
 
@@ -3716,8 +3945,7 @@ static bool getWiFiLiveSpots (WiFiClient &client, char *line, size_t line_len)
     return (true);
 }
 
-/* exit -- makes no sense on ESP
- * UNIX only
+/* exit
  */
 static bool doWiFiExit (WiFiClient &client, char *unused_line, size_t line_len)
 {
@@ -3736,9 +3964,6 @@ static bool doWiFiExit (WiFiClient &client, char *unused_line, size_t line_len)
 }
 
 
-#endif // defined(_IS_UNIX)
-
-
 
 /* table of command strings, its implementing function and additional info for help.
  * functions are called with user input string beginning just after the command and sans HTTP.
@@ -3747,7 +3972,6 @@ static bool doWiFiExit (WiFiClient &client, char *unused_line, size_t line_len)
  *      command[]'s without ? shall include trailing space to detect and prevent trailing garbage.
  *      table is located down here in this file so all handlers are already conveniently defined above.
  *      last N_UNDOC_CMD entries are not shown with help
- * the whole table uses arrays so strings are in ESP FLASH too.
  */
 #define CT_MAX_CMD      20                              // max command string length, w/EOS
 #define CT_MAX_HELP     60                              // max help string length, w/EOS
@@ -3765,9 +3989,7 @@ static const CmdTble command_table[] PROGMEM = {
     { "get_de.txt ",        getWiFiDEInfo,         "get DE info" },
     { "get_dx.txt ",        getWiFiDXInfo,         "get DX info" },
     { "get_dxspots.txt ",   getWiFiDXSpots,        "get DX spots" },
-#if defined(_IS_UNIX)
     { "get_livespots.txt ", getWiFiLiveSpots,      "get live spots list" },
-#endif // _IS_UNIX
     { "get_livestats.txt ", getWiFiLiveStats,      "get live spots statistics" },
     { "get_ontheair.txt ",  getWiFiOnTheAir,       "get POTA/SOTA activators" },
     { "get_satellite.txt ", getWiFiSatellite,      "get current sat info" },
@@ -3777,9 +3999,10 @@ static const CmdTble command_table[] PROGMEM = {
     { "get_sys.txt ",       getWiFiSys,            "get system stats" },
     { "get_time.txt ",      getWiFiTime,           "get current time" },
     { "get_voacap.txt ",    getWiFiVOACAP,         "get current band conditions matrix" },
-    { "set_adif?",          setWiFiADIF,           "file POST|none" },
+    { "set_adif?",          setWiFiADIF,           "file POST&pane=[0123]|none" },
     { "set_alarm?",         setWiFiAlarm,          "state=off|armed&time=HR:MN" },
     { "set_auxtime?",       setWiFiAuxTime,        "format=[one_from_menu]" },
+    { "set_bmp?",           setWiFiloadBMP,        "file POST&pane=[123]|none" },
     { "set_cluster?",       setWiFiCluster,        "host=xxx&port=yyy" },
     { "set_defmt?",         setWiFiDEformat,       "fmt=[one_from_menu]&atin=RSAtAt|RSInAgo" },
     { "set_displayOnOff?",  setWiFiDisplayOnOff,   "on|off" },
@@ -3791,7 +4014,9 @@ static const CmdTble command_table[] PROGMEM = {
     { "set_mapview?",       setWiFiMapView,        "Style=S&Grid=G&Projection=P&RSS=on|off&Night=on|off" },
     { "set_newde?",         setWiFiNewDE,          "grid=AB12&lat=X&lng=Y&TZ=local-utc?call=AA0XYZ" },
     { "set_newdx?",         setWiFiNewDX,          "grid=AB12&lat=X&lng=Y&TZ=local-utc" },
-    { "set_pane?",          setWiFiPane,           "Pane[123]=X,Y,Z... any from:" },
+    { "set_once_alarm?",    setWiFiOnceAlarm,      "state=off|armed&time=YYYY-MM-DDTHR:MN&tz=DE|UTC" },
+    { "set_pane?",          setWiFiPane,           "Pane[0123]=X,Y,Z... any from:" },
+    { "set_panzoom?",       setWiFiPanZoom,        "pan_x=X&pan_y=Y&pan_dx=dX&pan_dy=dY&zoom=Z" },
     { "set_rotator?",       setWiFiRotator,        "state=[un]stop|[un]auto&az=X&el=X" },
     { "set_rss?",           setWiFiRSS,            "reset|add=X|network|interval=secs|on|off|file POST" },
     { "set_satname?",       setWiFiSatName,        "abc|none" },
@@ -3803,11 +4028,9 @@ static const CmdTble command_table[] PROGMEM = {
     { "set_time?",          setWiFiTime,           "Now" },
     { "set_time?",          setWiFiTime,           "unix=secs_since_1970" },
     { "set_title?",         setWiFiTitle,          "msg=hello&fg=R,G,B&bg=R,G,B|rainbow" },
-    { "set_touch?",         setWiFiTouch,          "x=X&y=Y&hold=0|1" },
+    { "set_touch?",         setWiFiTouch,          "x=X&y=Y" },
     { "set_voacap?",        setWiFiVOACAP,         "band=X&power=W&tz=DE|UTC&mode=X&map=X&TOA=X" },
-#if defined(_IS_UNIX)
     { "exit ",              doWiFiExit,            "exit HamClock" },
-#endif // _IS_UNIX
     { "restart ",           doWiFiReboot,          "restart HamClock" },
     { "updateVersion ",     doWiFiUpdate,          "update to latest version"},
 
@@ -3823,7 +4046,8 @@ static const CmdTble command_table[] PROGMEM = {
 static bool roCommandOk (const char *cmd)
 {
     return (strncmp (cmd, "get_", 4) == 0
-                    || strncmp_P (cmd, PSTR("set_alarm"), 9) == 0
+                    || strncmp_P (cmd, PSTR("set_daily_alarm"), 15) == 0
+                    || strncmp_P (cmd, PSTR("set_once_alarm"), 14) == 0
                     || strncmp_P (cmd, PSTR("set_stopwatch"), 13) == 0
                     || strncmp_P (cmd, PSTR("set_touch"), 9) == 0
                     || strncmp_P (cmd, PSTR("set_screenlock"), 14) == 0);
@@ -3873,6 +4097,15 @@ static bool runWebserverCommand (WiFiClient &client, bool ro, char *command, siz
     return (false);
 }
 
+/* return whether the given line is a valid POST command
+ */
+static bool isPOST (const char *line)
+{
+    return (strncmp (line, _FX("POST /set_rss?"), 14) == 0
+            || strncmp (line, _FX("POST /set_adif?"), 15) == 0
+            || strncmp (line, _FX("POST /set_bmp?"), 14) == 0);
+}
+
 /* service remote restful connection.
  * if ro, only accept the get commands and a few more as listed in roCommandOk().
  * N.B. caller must close client, we don't.
@@ -3888,11 +4121,10 @@ static void serveRemote(WiFiClient &client, bool ro)
         return;
     }
 
-    // first line must be the GET except set_rss and set_adif which can be POST
-    if (strncmp (line, _FX("GET /"), 5) && strncmp (line, _FX("POST /set_rss?"), 14)
-                                && strncmp (line, _FX("POST /set_adif?"), 15)) {
+    // first line must be the GET except a few can be POST
+    if (strncmp (line, _FX("GET /"), 5) && !isPOST (line)) {
         Serial.println (line);
-        sendHTTPError (client, _FX("Method must be GET (or POST with set_rss or set_adif)\n"));
+        sendHTTPError (client, _FX("Method must be GET or POST\n"));
         return;
     }
     // Serial.printf ("web: %s\n", line);
@@ -3919,14 +4151,16 @@ static void serveRemote(WiFiClient &client, bool ro)
     if (runWebserverCommand (client, ro, cmd_start, line + line_mem.getSize() - cmd_start))
         return;
 
-    // if get here, command was not found but client is still open to list help
+    // if get here, command was not found but client is still open for help
     startPlainText(client);
-#if defined(_IS_UNIX)
-    if (liveweb_port > 0) {
-        snprintf (line, line_mem.getSize(), "HamClock Live is on port %d\r\n\r\n", liveweb_port);
+    if (liveweb_rw_port > 0) {
+        snprintf (line, line_mem.getSize(), "HamClock Live is R/W on port %d\r\n", liveweb_rw_port);
         client.print (line);
     }
-#endif
+    if (liveweb_ro_port > 0) {
+        snprintf (line, line_mem.getSize(), "HamClock Live is R/O on port %d\r\n", liveweb_ro_port);
+        client.print (line);
+    }
     for (uint8_t i = 0; i < N_CMDTABLE-N_UNDOC_CMD; i++) {
         const CmdTble *ctp = &command_table[i];
 
@@ -3996,15 +4230,9 @@ void initWebServer()
 
 
     restful_server = new WiFiServer(restful_port);
-
-    #if defined(_IS_ESP8266)
-        // Arduino version returns void
-        restful_server->begin();
-    #else
-        char ynot[100];
-        if (!restful_server->begin(ynot))
-            fatalError ("Failed to start RESTful server on port %d: %s", restful_port, ynot);
-    #endif
+    char ynot[100];
+    if (!restful_server->begin(ynot))
+        fatalError ("Failed to start RESTful server on port %d: %s", restful_port, ynot);
 
     tftMsg (true, 0, "RESTful API server on port %d", restful_port);
 
@@ -4041,27 +4269,22 @@ void runNextDemoCommand()
     if (!getDemoMode())
         return;
 
-    // wait for :15 or :45 unless previous was slow on ESP, and beware checking again during same second
+    // wait for :15 or :45
     static bool prev_slow;
     static time_t prev_t0;
     time_t t0 = nowWO();
     int t060 = t0 % 60;
-    #if defined(_IS_ESP8266)
-        if ( t0 == prev_t0 || ! (t060 == 15 || (t060 == 45 && !prev_slow)) )
-            return;
-    #else
-        if ( t0 == prev_t0 || ! (t060 == 15 || t060 == 45) )
-            return;
-    #endif
+    if ( t0 == prev_t0 || ! (t060 == 15 || t060 == 45) )
+        return;
     prev_t0 = t0;
 
     // list of probabilities for each DemoChoice, must sum to 100
     static const uint8_t item_probs[DEMO_N] = {
 
                 // 0
-        8,      // DEMO_PANE1
-        8,      // DEMO_PANE2
-        8,      // DEMO_PANE3
+        6,      // DEMO_PANE1
+        6,      // DEMO_PANE2
+        6,      // DEMO_PANE3
         4,      // DEMO_RSS
         9,      // DEMO_NEWDX
 
@@ -4069,21 +4292,21 @@ void runNextDemoCommand()
         3,      // DEMO_MAPPROJ
         3,      // DEMO_MAPNIGHT
         3,      // DEMO_MAPGRID
-        1,      // DEMO_MAPSTYLE
+        2,      // DEMO_MAPSTYLE
         9,      // DEMO_NCDXF
                 
                 // 10
-        2,      // DEMO_VOACAP
         5,      // DEMO_CALLFG
         4,      // DEMO_CALLBG
         12,     // DEMO_DEFMT
         4,      // DEMO_ONAIR
+        5,      // DEMO_SAT
 
                 // 15
-        5,      // DEMO_SAT
         5,      // DEMO_EME
         6,      // DEMO_AUXTIME
-        1,      // DEMO_PSKMASK
+        2,      // DEMO_PSKMASK
+        6,      // DEMO_PANE0
     };
 
     // record previous choice to avoid repeats
@@ -4153,15 +4376,49 @@ static bool runDemoChoice (DemoChoice choice, bool &slow, char msg[], size_t msg
     bool ok = false;
 
     switch (choice) {
+    case DEMO_PANE0:
+        {
+            // toggle
+            if (SHOWING_PANE_0()) {
+                restoreNormPANE0();
+                ok = true;
+                demoMsg (ok, choice, msg, msg_len, _FX("Pane 0 restored"));
+            } else {
+                // select an appropriate choice for PANE_0
+                PlotChoice pc = PLOT_CH_NONE;
+                for (int i = 0; i < 5 && pc == PLOT_CH_NONE; i++) {
+                    PlotChoice pc_new;
+                    switch (i) {
+                    case 0: pc_new = PLOT_CH_ADIF; break;
+                    case 1: pc_new = PLOT_CH_CONTESTS; break;
+                    case 2: pc_new = PLOT_CH_POTA; break;
+                    case 3: pc_new = PLOT_CH_SOTA; break;
+                    case 4: pc_new = PLOT_CH_DXCLUSTER; break;
+                    }
+                    if (plotChoiceIsAvailable(pc_new) && findPaneForChoice(pc_new) == PANE_NONE)
+                        pc = pc_new;
+                }
+                ok = pc != PLOT_CH_NONE && setPlotChoice (PANE_0, pc);
+                if (ok) {
+                    plot_rotset[PANE_0] = (1 << pc);   // no auto rotation
+                    logPaneRotSet (PANE_0, pc);
+                    demoMsg (ok, choice, msg, msg_len, _FX("Pane 0 now %s"), plot_names[pc]);
+                } else
+                    demoMsg (ok, choice, msg, msg_len, _FX("Pane 0 no choices"));
+            }
+        }
+        break;
+
     case DEMO_PANE1:
         {
             PlotChoice pc = getAnyAvailableChoice();
             ok = setPlotChoice (PANE_1, pc);
             if (ok) {
                 plot_rotset[PANE_1] = (1 << pc);   // no auto rotation
-                savePlotOps();
-            }
-            demoMsg (ok, choice, msg, msg_len, _FX("Pane 1 %s"), plot_names[pc]);
+                logPaneRotSet (PANE_1, pc);
+                demoMsg (ok, choice, msg, msg_len, _FX("Pane 1 now %s"), plot_names[pc]);
+            } else
+                demoMsg (ok, choice, msg, msg_len, _FX("Pane 1 no choices"));
         }
         break;
 
@@ -4171,9 +4428,10 @@ static bool runDemoChoice (DemoChoice choice, bool &slow, char msg[], size_t msg
             ok = setPlotChoice (PANE_2, pc);
             if (ok) {
                 plot_rotset[PANE_2] = (1 << pc);   // no auto rotation
-                savePlotOps();
-            }
-            demoMsg (ok, choice, msg, msg_len, _FX("Pane 2 %s"), plot_names[pc]);
+                logPaneRotSet (PANE_2, pc);
+                demoMsg (ok, choice, msg, msg_len, _FX("Pane 2 now %s"), plot_names[pc]);
+            } else
+                demoMsg (ok, choice, msg, msg_len, _FX("Pane 2 no choices"));
         }
         break;
 
@@ -4183,9 +4441,10 @@ static bool runDemoChoice (DemoChoice choice, bool &slow, char msg[], size_t msg
             ok = setPlotChoice (PANE_3, pc);
             if (ok) {
                 plot_rotset[PANE_3] = (1 << pc);   // no auto rotation
-                savePlotOps();
-            }
-            demoMsg (ok, choice, msg, msg_len, _FX("Pane 3 %s"), plot_names[pc]);
+                logPaneRotSet (PANE_3, pc);
+                demoMsg (ok, choice, msg, msg_len, _FX("Pane 3 now %s"), plot_names[pc]);
+            } else
+                demoMsg (ok, choice, msg, msg_len, _FX("Pane 3 no choices"));
         }
         break;
 
@@ -4202,13 +4461,22 @@ static bool runDemoChoice (DemoChoice choice, bool &slow, char msg[], size_t msg
 
     case DEMO_NEWDX:
         {
-            // avoid poles just for aesthetics
-            LatLong ll;
-            ll.lat_d = random(120)-60;
-            ll.lng_d = random(359)-180;
-            newDX (ll, NULL, NULL);
+            // walk a small collection of cities
+            static LatLong demo_ll[] = {
+                {0, 0, -26.2,  28.0},           // Johannesburg, South Africa
+                {0, 0, -22.9, -43.2},           // Rio de Janeiro, Brazi
+                {0, 0,  35.7, 139.7},           // Tokyo, Japan 
+                {0, 0, -33.9, 151.2},           // Sydney, Australia
+                {0, 0,  40.7, -74.0},           // New York City
+                {0, 0,  51.5, - 0.2},           // London
+            };
+            static int demo_ll_i;
+            LatLong &dll = demo_ll[demo_ll_i];
+            newDX (dll, NULL, NULL);
+            if (++demo_ll_i == NARRAY(demo_ll))
+                demo_ll_i = 0;
+            demoMsg (ok, choice, msg, msg_len, _FX("NewDX %g %g"), dll.lat_d, dll.lng_d);
             ok = true;
-            demoMsg (ok, choice, msg, msg_len, _FX("NewDX %g %g"), ll.lat_d, ll.lng_d);
         }
         break;
 
@@ -4259,45 +4527,9 @@ static bool runDemoChoice (DemoChoice choice, bool &slow, char msg[], size_t msg
         default:               brb_mode = BRB_SHOW_SWSTATS; break;
         }
         (void) drawNCDXFBox();
-        updateBeacons(true, true);
+        updateBeacons(true);
         ok = true;
         demoMsg (ok, choice, msg, msg_len, _FX("NCDXF %s"), brb_mode == BRB_SHOW_BEACONS ? "On" : "Off");
-        break;
-
-    case DEMO_VOACAP:
-        {
-            // find hottest band if recently updated
-            SPWxValue ssn, flux, kp, swind, drap, bz, bt;
-            NOAASpaceWx noaaspw;
-            float path[BMTRX_COLS];
-            char xray[10];
-            time_t noaaspw_age, xray_age, path_age;
-            getSpaceWeather (ssn,flux,kp,swind,drap,bz,bt,noaaspw,noaaspw_age,xray,xray_age,path,path_age);
-            if (path_age < 2*3600) {
-
-                // pick band with best propagation
-                float best_rel = 0;
-                for (int i = 0; i < BMTRX_COLS; i++) {
-                    if (path[i] > best_rel) {
-                        best_rel = path[i];
-                        prop_map.band = (PropMapBand)i;
-                    }
-                }
-
-                // engage
-                scheduleNewVOACAPMap (prop_map);
-                slow = true;
-                ok = true;
-
-                char ps[NV_COREMAPSTYLE_LEN];
-                demoMsg (ok, choice, msg, msg_len, _FX("VOACAP %s"), getMapStyle(ps));
-
-            } else {
-                // too old to use
-                ok = false;
-                demoMsg (ok, choice, msg, msg_len, _FX("VOACAP too old"));
-            }
-        }
         break;
 
     case DEMO_CALLFG:

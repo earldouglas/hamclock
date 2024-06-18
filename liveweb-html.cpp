@@ -35,9 +35,10 @@ char live_html[] =  R"_raw_html_(
         // config
         const UPDATE_MS = 100;          // update interval
         const MOUSE_JITTER = 5;         // allow this much mouse motion for a touch
-        const MOUSE_HOLD_MS = 3000;     // mouse down duration to implement hold action
         const APP_W = 800;              // app coord system width
-        const nonan_chars = ['Tab', 'Enter', 'Space', 'Escape', 'Backspace'];    // supported non-alnum chars
+        const nonan_chars =             // supported non-alnum chars
+          ['Tab', 'Enter', 'Space', 'Escape', 'Backspace', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'ArrowRight'];
+        const RELOAD_KEY = "reload";    // sessionStorage key to manage reloads
 
         // state
         var ws;                         // Websocket
@@ -47,11 +48,10 @@ char live_html[] =  R"_raw_html_(
         var event_verbose = 0;          // > 0 for more info about keyboard or pointer activity
         var prev_regnhdr;               // for erasing if drawing_verbose > 1
         var app_scale = 0;              // size factor -- set for real when get first whole image
-        var pointerdown_ms = 0;         // Date.now when pointerdown event
         var pointerdown_x = 0;          // location of pointerdown event
         var pointerdown_y = 0;          // location of pointerdown event
         var pointermove_ms = 0;         // Date.now when pointermove event
-        var fs_success = 0;             // whether setting full screen has ever succeeded
+        var want_fs, tried_fs;          // whether user wants full screen and has succeeded once
         var cvs, ctx;                   // handy
 
         // define functions, onLoad follows near the bottom
@@ -228,37 +228,31 @@ char live_html[] =  R"_raw_html_(
             }
         }
 
-        // send the given key to the hamclock
-        function sendKey (k) {
+        // send the given key and optionl control and shift modifier codes to the hamclock
+        function sendKey (k, c, s) {
             if (event_verbose)
                 console.log('sending ' + k);
-            sendWSMsg ('set_char?char=' + k);
+            var msg = 'set_char?char=' + k + '&mod=';
+            if (c)
+                msg += 'C';
+            if (s)
+                msg += 'S';
+            sendWSMsg (msg);
         }
 
 
         // connect keydown to send character to hamclock, beware ctrl keys and browser interactions
         window.addEventListener('keydown', function(event) {
 
-            // get char name or map arrow keys to vi
-            var key;
-            switch (event.key) {
-            case 'ArrowLeft':  key = 'h'; break;
-            case 'ArrowDown':  key = 'j'; break;
-            case 'ArrowUp':    key = 'k'; break;
-            case 'ArrowRight': key = 'l'; break;
-            default:           key = event.key;
-            }
+            // now that user has done something check if they want to go full screen
+            checkFullScreen();
+
+            // local copy for possible modification
+            var key = event.key;
 
             // a real space would send 'char= ' which doesn't parse so we invent Space name
             if (key === ' ')
                 key = 'Space';
-
-            // ignore if modified
-            if (event.metaKey || event.ctrlKey || event.altKey) {
-                if (event_verbose)
-                    console.log('ignoring modifier ' + key);
-                return;
-            }
 
             // accept only certain non-alphanumeric keys
             if (key.length > 1 && !nonan_chars.find (e => { if (e == key) return true; })) {
@@ -274,7 +268,7 @@ char live_html[] =  R"_raw_html_(
                 event.preventDefault();
             }
 
-            sendKey (key);
+            sendKey (key, event.ctrlKey, event.shiftKey);
         });
 
         // respond to mobile device being rotated. resize seems to work better than orientationchange
@@ -286,17 +280,47 @@ char live_html[] =  R"_raw_html_(
             runSoon (getFullImage);
         });
 
-        // reload this page as last resort, probably because server process restarted
+        // show _one_ simple stand-alone message
+        var msg_drawn;
+        function drawMsgOnce (msg) {
+            if (!msg_drawn) {
+                ctx.fillStyle = "black";
+                ctx.fillRect (0, 0, 1000, 1000);
+                ctx.fillStyle = "orange";
+                ctx.font = "25px sans-serif";
+                ctx.fillText (msg, 50, 50);
+                msg_drawn = 1;
+            }
+        }
+
+
+        // reload this page a few times, presumably hamclock was restarted but don't try forever
         function reloadThisPage() {
 
-            console.log ('* reloading');
-            setTimeout (function() {
-                try {
-                    window.location.reload(true);
-                } catch(err) {
-                    console.log('* reload err: ' + err);
-                }
-            }, 2000);
+            // use sessionStorage to detect reloading
+            var s = sessionStorage.getItem (RELOAD_KEY);
+
+            if (s) {
+
+                // already loaded once, just report without restart but remove key to allow manual reloading
+                sessionStorage.removeItem (RELOAD_KEY);
+                drawMsgOnce ("No connection");
+
+            } else {
+
+                // record key so we can detect subsequent reload
+                sessionStorage.setItem (RELOAD_KEY, "one");
+
+                console.log ('* reloading');
+                setTimeout (function() {
+                    try {
+                        window.location.reload(true);
+                    } catch(err) {
+                        console.log('* reload err: ' + err);
+                    }
+                }, 3000);               // setup waits for 10 seconds
+
+            }
         }
 
 
@@ -307,8 +331,18 @@ char live_html[] =  R"_raw_html_(
                 setTimeout (sendWSMsg, 500, msg);
             } else {
                 if (ws_verbose)
-                    console.log ('sendWSMsg ' + msg);
+                    console.log ('sendWSMsg: ' + msg);
                 ws.send (msg);
+            }
+        }
+
+        // try once to engage full screen if desired.
+        // N.B. must be called from a user action
+        function checkFullScreen() {
+            if (want_fs && !tried_fs) {
+                console.log ("engaging FS");
+                document.documentElement.requestFullscreen()
+                tried_fs = true;
             }
         }
 
@@ -321,12 +355,10 @@ char live_html[] =  R"_raw_html_(
             ws = new WebSocket ( ws_proto + ws_host);
             ws.binaryType = "arraybuffer";
             ws.onopen = function () {
-                if (ws_verbose)
-                    console.log('WS connection established.');
+                console.log('WS connection established.');
             };
             ws.onclose = function () {
-                if (ws_verbose)
-                    console.log('WS connection closed.');
+                console.log('WS connection closed.');
                 reloadThisPage();
             };
             ws.onerror = function (e) {
@@ -337,9 +369,12 @@ char live_html[] =  R"_raw_html_(
 
             // respond to hamclock messages
             ws.onmessage = function (e) {
-                if (ws_verbose)
+                if (ws_verbose > 1)
                     console.log ('ws onmessage length ' + e.data.byteLength);
+
                 if (e.data instanceof ArrayBuffer) {
+                    // received whole or update image
+
                     var data8 = new Uint8Array (e.data);
                     if (data8[0] == 137 && data8[1] == 80 && data8[2] == 78 && data8[3] == 71) {
                         // this is a PNG image -- show whole if alone else assume its part of an update
@@ -348,26 +383,48 @@ char live_html[] =  R"_raw_html_(
                             ws_abdata = 0;
                         } else {
                             drawFullImage (data8);
+                            // allow restart
+                            sessionStorage.removeItem (RELOAD_KEY);
                         }
                         // ask for updates regardless
                         runSoon (getUpdate);
-                    } else if (data8[0] == 99 && data8[1] == 91) {      // see liveweb.cpp
-                        // this is a message whether to be in full screen mode.
-                        // only succeed once in case user wants to cancel
-                        if (data8[2]) {
-                            if (!fs_success) {
-                                if (document.fullscreenElement)
-                                    fs_success = 1;
-                                else
-                                    document.documentElement.requestFullscreen();
-                            }
-                        }
                     } else {
                         // this is an update patch collection
                         ws_abdata = e.data;
                     }
+
+                } else if (typeof e.data === 'string') {
+                    // received text message
+
+                    if (ws_verbose)
+                        console.log ('rxWSMsg: ', e.data);
+
+                    if (e.data === 'full-screen') {
+                        // record user wants full screen, won't actually happen until they click.
+                        // message arrives continuously because client can't tell if user reloaded page.
+                        if (!want_fs) {
+                            console.log ("user wants FS");
+                            tried_fs = false;
+                            want_fs = true;
+                        }
+                    }
+
+                    else if (e.data.substring(0,5) == 'open ') {
+                        // try to open a url
+                        var url = e.data.substring(5);
+                        console.log('opening ', url);
+                        if (!window.open(url))
+                            console.log ("Failed to open ", url);
+                    }
+
+                    else
+                        drawMsgOnce (e.data);
+
+                } else {
+                    console.log ("Unknown WS data: ", e.data);
                 }
             }
+
             
             // handy access to canvas and drawing context
             cvs = document.getElementById('hamclock-cvs');
@@ -376,6 +433,9 @@ char live_html[] =  R"_raw_html_(
 
             // pointerdown: record time and position
             cvs.addEventListener ('pointerdown', function(event) {
+                // check if user wants to go full screen
+                checkFullScreen();
+
                 // all ours
                 event.preventDefault();
 
@@ -385,7 +445,7 @@ char live_html[] =  R"_raw_html_(
                     return;
                 }
 
-                pointerdown_ms = Date.now();
+                pointermove_ms = Date.now();
                 pointerdown_x = m.x;
                 pointerdown_y = m.y;
                 if (event_verbose)
@@ -402,7 +462,7 @@ char live_html[] =  R"_raw_html_(
 
             });
 
-            // pointerup: send touch, hold depending on duration since pointerdown
+            // pointerup: send set_touch
             cvs.addEventListener ('pointerup', function(event) {
                 // all ours
                 event.preventDefault();
@@ -414,20 +474,21 @@ char live_html[] =  R"_raw_html_(
                     return;
                 }
 
-                // ignore if pointer moved
+                // ignore if pointer moved so moves don't end with a tap
                 if (Math.abs(m.x-pointerdown_x) > MOUSE_JITTER || Math.abs(m.y-pointerdown_y) > MOUSE_JITTER){
                     if (event_verbose)
                         console.log ('cancel pointerup because pointer moved');
                     return;
                 }
 
-                // decide whether hold
-                let pointer_dt = pointerdown_ms ? Date.now() - pointerdown_ms : 0;
-                let hold = pointer_dt >= MOUSE_HOLD_MS;
-                pointerdown_ms = 0;
+                // code button0+mods or button1 as button 1, else button 0.
+                // N.B. event.button 0 means button 1 !
+                var mods = event.ctrlKey || event.metaKey;
+                var button = ((event.button == 0 && mods) || event.button == 1) ? 1 : 0;
+                console.log (event.button + "+" + mods + " -> " + button);
 
                 // compose and send
-                let msg = 'set_touch?x=' + m.x + '&y=' + m.y + (hold ? '&hold=1' : '&hold=0');
+                let msg = 'set_touch?x=' + m.x + '&y=' + m.y + '&button=' + button;
                 sendWSMsg (msg);
             });
 

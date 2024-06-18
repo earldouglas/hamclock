@@ -102,43 +102,23 @@ class Adafruit_RA8875 {
 
 	Adafruit_RA8875(uint8_t CS, uint8_t RST);
 
-	void displayOn (int o)
-	{
-	}
+	void displayOn (int o) { (void)o; }
 
-	void GPIOX (int x)
-	{
-	}
+	void GPIOX (int x) { (void)x; }
 
-	void PWM1config(bool t, int x)
-	{
-	}
+	void PWM1config(bool t, int x) { (void)t; (void)x; }
 
-	void graphicsMode(void)
-	{
-	}
+	void graphicsMode(void) { }
 
+	void writeCommand (uint8_t c) { (void)c; }
 
-	void writeCommand (uint8_t c)
-	{
-	}
+	void setRotation (int r) { rotation = r; }
 
-	void setRotation (int r)
-	{
-	    rotation = r;
-	}
+	void textSetCursor(uint16_t x, uint16_t y) { (void)x; (void)y; }
 
-	void textSetCursor(uint16_t x, uint16_t y)
-	{
-	}
+	void PWM1out(uint16_t bpwm) { (void)bpwm; }
 
-	void PWM1out(uint16_t bpwm)
-	{
-	}
-
-	void touchEnable (bool b)
-	{
-	}
+	void touchEnable (bool b) { (void)b; }
 
 	bool begin (int x);
 	uint16_t width(void);
@@ -165,7 +145,7 @@ class Adafruit_RA8875 {
 	int16_t getCursorX(void);
 	int16_t getCursorY(void);
 	bool touched(void);
-	void touchRead (uint16_t *x, uint16_t *y);
+	void touchRead (uint16_t *x, uint16_t *y, int *button);
 	void drawPixel(int16_t x, int16_t y, uint16_t color16);
         void drawPixels(uint16_t * p, uint32_t count, int16_t x, int16_t y);
 	void drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color16);
@@ -202,15 +182,16 @@ class Adafruit_RA8875 {
 	int SCALESZ;
 
         // put and get next keyboard character
-        void putChar (char c);
-        char getChar(bool *control, bool *shift);
+        void putChar (char c, bool ctrl, bool shift);
+        char getChar(bool *ctrl, bool *shift);
 
         // set and get current mouse position
         bool getMouse (uint16_t *x, uint16_t *y);
         void setMouse (int x, int y);
         bool warpCursor (char dir, unsigned n, int *xp, int *yp);
 
-        void setEarthPix (char *day_pixels, char *night_pixels);
+        // set mmap'ed location and size of day and night images, size in units of uint16_t
+        void setEarthPix (char *day_pixels, char *night_pixels, int width, int height);
 
         // used to engage/disengage X11 fullscreen
         void X11OptionsEngageNow (bool fullscreen);
@@ -241,29 +222,21 @@ class Adafruit_RA8875 {
 
 	#define FB_XRES 1600
 	#define FB_YRES 960
-	#define EARTH_BIG_W 1320
-	#define EARTH_BIG_H 660
 
 #elif defined(_CLOCK_2400x1440)
 
 	#define FB_XRES 2400
 	#define FB_YRES 1440
-	#define EARTH_BIG_W 1980
-	#define EARTH_BIG_H 990
 
 #elif defined(_CLOCK_3200x1920)
 
 	#define FB_XRES 3200
 	#define FB_YRES 1920
-	#define EARTH_BIG_W 2640
-	#define EARTH_BIG_H 1320
 
 #else   // original size
 
 	#define FB_XRES 800
 	#define FB_YRES 480
-	#define EARTH_BIG_W 660
-	#define EARTH_BIG_H 330
 
 #endif
 
@@ -284,6 +257,7 @@ class Adafruit_RA8875 {
         void encodeKeyEvent (XKeyEvent *event);
         void captureSelection(void);
         bool requestSelection (KeySym ks, unsigned kb_state);
+        int decodeMouseButton (XEvent event);
 
 
 #endif // _USE_X11
@@ -312,6 +286,7 @@ class Adafruit_RA8875 {
 
 	pthread_mutex_t mouse_lock;
 	volatile int16_t mouse_x, mouse_y;
+        volatile int mouse_button;
 	volatile int mouse_ups, mouse_downs;
 
         typedef struct {
@@ -365,9 +340,13 @@ class Adafruit_RA8875 {
         void drawThickLine (int16_t aXStart, int16_t aYStart, int16_t aXEnd, int16_t aYEnd,
                         int16_t aThickness, uint8_t aThicknessMode, fbpix_t aColor);
 
-	// big earth mmap'd maps
-        uint16_t (*DEARTH_BIG)[EARTH_BIG_H][EARTH_BIG_W];
-        uint16_t (*NEARTH_BIG)[EARTH_BIG_H][EARTH_BIG_W];
+	// big earth mmap'd maps, actually 2d EARTH_BIG_H rows x EARTH_BIG_W columns
+        uint16_t *DEARTH_BIG;
+        uint16_t *NEARTH_BIG;
+        int EARTH_BIG_H, EARTH_BIG_W;
+
+        // handy macro to implement the 2d nature of the arrays
+        #define EPIXEL(a,r,c)   ((a)[(r)*EARTH_BIG_W + (c)])
 
         // swap two pairs of x and y
         void swap2 (int16_t &x0, int16_t &y0, int16_t &x1, int16_t &y1) {
