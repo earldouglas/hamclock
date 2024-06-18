@@ -25,8 +25,8 @@ in {
         pkgs.fetchFromGitHub {
           owner = "earldouglas";
           repo = "hamclock";
-          rev = "76b6ee262ba12b97d8bea5abdf7868810e44195c";
-          sha256 = "sha256-lL1rbbbit6uu2VWkoT+01z7LNgt7HUS4lh1b+1hzWD4=";
+          rev = "857beea92f91ae3194738807dba07dcee1565c8b";
+          sha256 = "0wiapkxk31nm6zrlfwvcbq8bzybbz2g61g4gn06jh85iw4z0s1pa";
         };
 
       hamclockWeb =
@@ -79,9 +79,12 @@ in {
         description = "hamclock";
         after = [ "network.target" ];
         wantedBy = [ "multi-user.target" ];
+        script = ''
+          export PATH="$PATH:/run/current-system/sw/bin"
+          ${hamclockWeb}/bin/hamclock-web-2400x1440 -k -g -o -f on -d /home/hamclock/.hamclock/
+        '';
         serviceConfig = {
           WorkingDirectory = "/home/hamclock";
-          ExecStart = "${hamclockWeb}/bin/hamclock-web-2400x1440 -k";
           User = "hamclock";
           Restart = "always";
         };
