@@ -6,8 +6,8 @@ pkgs.stdenv.mkDerivation {
     pkgs.fetchFromGitHub {
       owner = "earldouglas";
       repo = "hamclock";
-      rev = "4.03";
-      sha256 = "18cm9v0p6vyy9dmcqyif71maw0gv6q2dhd72wqhmf37fh2nlysi4";
+      rev = "4.10";
+      sha256 = "sha256-5RiylF6K15Etcxk0Zr+cv7gwNp4HDz9A3Xqb7FjrYuo=";
     };
 
   nativeBuildInputs = [
