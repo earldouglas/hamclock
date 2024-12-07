@@ -25,8 +25,8 @@ in {
         pkgs.fetchFromGitHub {
           owner = "earldouglas";
           repo = "hamclock";
-          rev = "857beea92f91ae3194738807dba07dcee1565c8b";
-          sha256 = "0wiapkxk31nm6zrlfwvcbq8bzybbz2g61g4gn06jh85iw4z0s1pa";
+          rev = "108f6031437ba53137e09e21234f1ceb15564566";
+          sha256 = "1qwwq35kf3gp9n6hgldryl3q1g1zrrvpggl8njajqmmnxwmq0bgl";
         };
 
       hamclockWeb =
