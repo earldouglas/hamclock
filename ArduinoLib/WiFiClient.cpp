@@ -16,6 +16,7 @@ WiFiClient::WiFiClient()
 	socket = -1;
 	n_peek = 0;
         next_peek = 0;
+        eof = false;
 }
 
 // constructor handed an open socket to use
@@ -25,6 +26,7 @@ WiFiClient::WiFiClient(int fd)
 	socket = -1;
 	n_peek = 0;
         next_peek = 0;
+        eof = false;
 
         if (fd >= 0 && _trace_client)
             printf ("WiFiCl: new WiFiClient inheriting fd %d\n", fd);
@@ -32,14 +34,17 @@ WiFiClient::WiFiClient(int fd)
 	socket = fd;
 	n_peek = 0;
         next_peek = 0;
+        eof = false;
 }
 
-// return whether this socket is active
+// return whether this socket is active and make sure it's closed if not
 WiFiClient::operator bool()
 {
-        bool is_active = socket != -1;
-        if (_trace_client && is_active)
-            printf ("WiFiCl: fd %d is active\n", socket);
+        bool is_active = socket != -1 && !eof;
+        if (_trace_client > 1)
+            printf ("WiFiCl: bool fd %d: active?%d eof?%d\n", socket, is_active, eof);
+        if (!is_active)
+            stop();
 	return (is_active);
 }
 
@@ -133,7 +138,7 @@ bool WiFiClient::connect(const char *host, int port)
         }
 
         /* connect */
-        if (connect_to (sockfd, aip->ai_addr, aip->ai_addrlen, 5000) < 0) {
+        if (connect_to (sockfd, aip->ai_addr, aip->ai_addrlen, 8000) < 0) {
             printf ("WiFiCl: connect(%s:%d): %s\n", host, port, strerror(errno));
             freeaddrinfo (aip);
             close (sockfd);
@@ -143,13 +148,17 @@ bool WiFiClient::connect(const char *host, int port)
         /* handle write errors inline */
         signal (SIGPIPE, SIG_IGN);
 
-        /* ok */
+        /* ok start fresh */
         if (_trace_client)
             printf ("WiFiCl: new %s:%d fd %d\n", host, port, sockfd);
         freeaddrinfo (aip);
+
+        // init much like constructors
 	socket = sockfd;
 	n_peek = 0;
         next_peek = 0;
+        eof = false;
+
         return (true);
 }
 
@@ -172,13 +181,14 @@ void WiFiClient::stop()
 {
 	if (socket >= 0) {
             if (_trace_client)
-                printf ("WiFiCl: fd %d is now closed\n", socket);
+                printf ("WiFiCl: stopping fd %d\n", socket);
 	    shutdown (socket, SHUT_RDWR);
 	    close (socket);
 	    socket = -1;
 	    n_peek = 0;
             next_peek = 0;
-	}
+	} else if (_trace_client > 1)
+            printf ("WiFiCl: fd %d already stopped\n", socket);
 }
 
 bool WiFiClient::connected()
@@ -188,28 +198,16 @@ bool WiFiClient::connected()
 
 int WiFiClient::available()
 {
-        // none if closed
-        if (socket < 0)
+        // none if closed or eof
+        if (socket < 0 || eof)
             return (0);
 
         // simple if unread bytes already available
 	if (next_peek < n_peek)
 	    return (1);
 
-        // don't block if nothing available
-        struct timeval tv;
-        fd_set rset;
-        FD_ZERO (&rset);
-        FD_SET (socket, &rset);
-        tv.tv_sec = 0;
-        tv.tv_usec = 0;
-        int s = select (socket+1, &rset, NULL, NULL, &tv);
-        if (s < 0) {
-            printf ("WiFiCl: fd %d select err: %s\n", socket, strerror(errno));
-	    stop();
-	    return (0);
-	}
-        if (s == 0)
+        // don't block if nothing more is available
+        if (!pending(0))
             return (0);
 
         // read more
@@ -220,12 +218,14 @@ int WiFiClient::available()
 	    n_peek = nr;
             next_peek = 0;
 	    return (1);
-	} else {
-            if (nr == 0) {
-                if (_trace_client)
-                    printf ("WiFiCl: read(%d) EOF\n", socket);
-            } else
-                printf ("WiFiCl: read(%d): %s\n", socket, strerror(errno));
+	} else if (nr == 0) {
+            if (_trace_client)
+                printf ("WiFiCl: read(%d) EOF\n", socket);
+            eof = true;
+	    stop();
+	    return (0);
+        } else {
+            printf ("WiFiCl: read(%d): %s\n", socket, strerror(errno));
 	    stop();
 	    return (0);
 	}
@@ -233,8 +233,11 @@ int WiFiClient::available()
 
 int WiFiClient::read()
 {
-	if (available())
+	if (available()) {
+            if (_trace_client > 1)
+                printf ("WiFiCl: read(%d) returning %c %d\n", socket, peek[next_peek], peek[next_peek]);
             return (peek[next_peek++]);
+        }
 	return (-1);
 }
 
@@ -364,4 +367,61 @@ IPAddress WiFiClient::remoteIP()
         int oct0, oct1, oct2, oct3;
         sscanf (s, "%d.%d.%d.%d", &oct0, &oct1, &oct2, &oct3);
 	return (IPAddress(oct0,oct1,oct2,oct3));
+}
+
+/* return whether more is available after waiting up to ms.
+ * non-standard
+ */
+bool WiFiClient::pending(int ms)
+{
+        struct timeval tv;
+        fd_set rset;
+        FD_ZERO (&rset);
+        FD_SET (socket, &rset);
+        tv.tv_sec = ms/1000;
+        tv.tv_usec = (ms-1000*tv.tv_sec)*1000;
+        int s = select (socket+1, &rset, NULL, NULL, &tv);
+        if (s < 0) {
+            printf ("WiFiCl: fd %d select(%d ms): %s\n", socket, ms, strerror(errno));
+	    stop();
+	    return (false);
+	}
+        return (s != 0);
+}
+
+/* read n bytes unless EOF. return whether ok.
+ */
+bool WiFiClient::readArray (char buf[], int n)
+{
+        // first use any in peek[]
+        if (n_peek > next_peek) {
+            int n_more = n_peek - next_peek;
+            int n_use = n < n_more ? n : n_more;
+            memcpy (buf, peek+next_peek, n_use);
+            next_peek += n_use;
+            buf += n_use;
+            n -= n_use;
+        }
+
+        // if need more bypass peek[] which will now be empty
+        while (n > 0) {
+            if (!pending(5000))
+                return (false);
+            int nr = ::read (socket, buf, n);
+            if (nr < 0) {
+                printf ("WiFiCl: read(%d,%d): %s\n", socket, n, strerror(errno));
+                return (false);
+            }
+            if (nr == 0) {
+                if (_trace_client)
+                    printf ("WiFiCl: readArray(%d) EOF\n", socket);
+                eof = true;
+                stop();
+                return (false);
+            }
+            buf += nr;
+            n -= nr;
+        }
+
+        return (true);
 }

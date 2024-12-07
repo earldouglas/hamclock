@@ -41,15 +41,6 @@ struct fb_var_screeninfo {
 extern const GFXfont Courier_Prime_Sans6pt7b;
 
 
-#ifndef RGB565
-#define RGB565(R,G,B)   ((((uint16_t)(R) & 0xF8) << 8) | (((uint16_t)(G) & 0xFC) << 3) | ((uint16_t)(B) >> 3))
-#endif
-
-#define RGB565_R(c)     (255*(((c) & 0xF800) >> 11)/((1<<5)-1))
-#define RGB565_G(c)     (255*(((c) & 0x07E0) >> 5)/((1<<6)-1))
-#define RGB565_B(c)     (255*((c) & 0x001F)/((1<<5)-1))
-
-
 
 #if defined(B_AND_W)
 // this only works for 32 bit framebuffer
@@ -77,6 +68,10 @@ extern const GFXfont Courier_Prime_Sans6pt7b;
 
 
 // choose 16 or 32 bit hw frame buffer
+#if defined(_USE_FB0)
+    // can find no way to support 32 on Pi5 so use 16 by default
+    #define _16BIT_FB
+#endif
 #if defined(_16BIT_FB)
 typedef uint16_t fbpix_t;
 #define BYTESPFBPIX     2
@@ -84,13 +79,15 @@ typedef uint16_t fbpix_t;
 #define RGB16TOFBPIX(x) x
 #define FBPIXTORGB16(x) x
 #define FBPIXTORGB32(x) RGB1632(x)
-#else
+#define RGB32TOFBPIX(x) RGB565( (((x)>>16)&0xff), (((x)>>8)&0xff), ((x)&0xff) )
+#else   // 32 bpp
 typedef uint32_t fbpix_t;
 #define BYTESPFBPIX     4
 #define BITSPFBPIX      32
 #define RGB16TOFBPIX(x) RGB1632(x)
 #define FBPIXTORGB16(x) RGB3216(x)
 #define FBPIXTORGB32(x) x
+#define RGB32TOFBPIX(x) x
 #endif
 
 // basic background refresh interval, usecs
@@ -135,6 +132,7 @@ class Adafruit_RA8875 {
 	void print (float f, int p = 2);
 	void print (long l);
 	void print (long long ll);
+        void printf (const char *fmt, ...);
 	void println (void);
 	void println (char *s);
 	void println (const char *s);
@@ -142,6 +140,7 @@ class Adafruit_RA8875 {
 	void setXY (int16_t x, int16_t y);
 	uint16_t readData(void);
 	void setFont (const GFXfont *f);
+	const GFXfont* getFont (void);
 	int16_t getCursorX(void);
 	int16_t getCursorY(void);
 	bool touched(void);
@@ -152,8 +151,8 @@ class Adafruit_RA8875 {
 	void drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t thickness, uint16_t color16);
 	void drawRect(int16_t x0, int16_t y0, int16_t w, int16_t h, uint16_t color16);
 	void fillRect(int16_t x0, int16_t y0, int16_t w, int16_t h, uint16_t color16);
-	void drawCircle(int16_t x0, int16_t y0, int16_t r, uint16_t color16);
-	void fillCircle(int16_t x0, int16_t y0, int16_t r, uint16_t color16);
+	void drawCircle(int16_t x0, int16_t y0, uint16_t r, uint16_t color16);
+	void fillCircle(int16_t x0, int16_t y0, uint16_t r, uint16_t color16);
 	void drawTriangle(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t x2, int16_t y2,
 	    uint16_t color16);
 	void fillTriangle(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t x2, int16_t y2,
@@ -164,8 +163,9 @@ class Adafruit_RA8875 {
 	void drawLineRaw(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t thickness, uint16_t color16);
 	void fillRectRaw(int16_t x0, int16_t y0, int16_t w, int16_t h, uint16_t color16);
 	void drawRectRaw(int16_t x0, int16_t y0, int16_t w, int16_t h, uint16_t color16);
-	void fillCircleRaw(int16_t x0, int16_t y0, int16_t r, uint16_t color16);
-	void drawCircleRaw(int16_t x0, int16_t y0, int16_t r, uint16_t color16);
+	void fillCircleRaw(int16_t x0, int16_t y0, uint16_t r, uint16_t color16);
+	void drawCircleRaw(int16_t x0, int16_t y0, uint16_t r, uint16_t color16);
+	void drawCircleRaw(int16_t x0, int16_t y0, uint16_t r, int thickness, uint16_t color16);
 
 	// special method to draw hi res earth pixel
 	void plotEarth (uint16_t x0, uint16_t y0, float lat0, float lng0,
@@ -204,6 +204,11 @@ class Adafruit_RA8875 {
 
         // very fast pixel access
         bool getRawPix(uint8_t *rgb24, int bytes);
+
+        // control whether to display gray
+        void setGrayDisplay (GrayDpy_t g) {
+            gray_type = g;
+        };
 
     protected:
 
@@ -259,6 +264,7 @@ class Adafruit_RA8875 {
         bool requestSelection (KeySym ks, unsigned kb_state);
         int decodeMouseButton (XEvent event);
 
+        void saveWinGeom(void);
 
 #endif // _USE_X11
 
@@ -330,8 +336,8 @@ class Adafruit_RA8875 {
 	void plotfb (int16_t x, int16_t y, fbpix_t color);
         void plotDrawRect (int16_t x0, int16_t y0, int16_t w, int16_t h, fbpix_t fbpix);
         void plotFillRect (int16_t x0, int16_t y0, int16_t w, int16_t h, fbpix_t fbpix);
-        void plotDrawCircle (int16_t x0, int16_t y0, int16_t r0, fbpix_t fbpix);
-        void plotFillCircle(int16_t x0, int16_t y0, int16_t r0, fbpix_t fbpix);
+        void plotDrawCircle (int16_t x0, int16_t y0, uint16_t r0, fbpix_t fbpix);
+        void plotFillCircle(int16_t x0, int16_t y0, uint16_t r0, fbpix_t fbpix);
 
         // brezenham implementation
         void plotLineRaw (int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t thick, fbpix_t color);
@@ -353,6 +359,9 @@ class Adafruit_RA8875 {
             int16_t tx = x0; x0 = x1; x1 = tx;
             int16_t ty = y0; y0 = y1; y1 = ty;
         }
+
+        // set whether to display gray
+        GrayDpy_t gray_type;
 
 };
 

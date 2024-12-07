@@ -21,6 +21,7 @@ static float max_cpu_usage = DEF_CPU_USAGE;
 char **our_argv;                // our argv for restarting
 std::string our_dir;            // our storage directory, including trailing /
 bool rm_eeprom;                 // set by -0 to rm eeprom to restore defaults
+bool ignore_x11geom;            // set by -q to ignore startup loc and size
 
 // list of diagnostic files, newest first
 const char *diag_files[N_DIAG_FILES] = {
@@ -242,6 +243,41 @@ static void setUsrDateTime (const char *iso8601)
         usr_datetime = mktime (&tms);
 }
 
+static int qsStrcmp (const void *v1, const void *v2)
+{
+    return (strcmp (*(char **)v1, *(char **)v2));
+}
+
+/* log some misc sys info
+ */
+static void logSys()
+{
+        char cwd[1000];
+        char *cwdp = getcwd (cwd, sizeof(cwd));
+        if (cwdp)
+            printf ("CWD %s\n", cwdp);
+        printf ("process id %d\n", getpid());
+        printf ("built as %s\n", our_make);
+        printf ("working directory is %s\n", our_dir.c_str());
+        printf ("ruid %d euid %d\n", getuid(), geteuid());
+        if (pw_file)
+            capturePasswords (pw_file);
+
+        // show sorted env w/o changing original list
+        extern char **environ;
+        int n_env = 0;
+        for (char **e = environ; *e != NULL; e++)
+            n_env++;
+        char **env_sort = (char **) malloc (n_env * sizeof(char *));
+        for (int i = 0; i < n_env; i++)
+            env_sort[i] = environ[i];
+        qsort (env_sort, n_env, sizeof(char*), qsStrcmp);
+        printf ("ENV:\n");
+        for (int i = 0; i < n_env; i++)
+            printf ("  %s\n", env_sort[i]);
+        free (env_sort);
+}
+
 /* log easy OS info
  */
 static void logOS()
@@ -258,6 +294,22 @@ static void logOS()
 
         if ((system ("uname -a") >> 8) != 0)
             printf ("uname failed\n");
+
+    #if defined (_IS_LINUX_RPI)
+        // try to display model name
+        static const char rpi_model[] = "/sys/firmware/devicetree/base/model";
+        int rpi_fd = open (rpi_model, O_RDONLY);
+        if (rpi_fd >= 0) {
+            char line[100];
+            ssize_t nr = read (rpi_fd, line, sizeof(line));
+            if (nr > 0)
+                printf ("%.*s\n", (int)nr, line);                // line does not include \n
+            else
+                printf ("%.*s: %s\n", (int)nr, line, nr == 0 ? "EOF" : strerror(errno));
+        } else {
+            printf ("%s: %s\n", rpi_model, strerror(errno));
+        }
+    #endif
 }
 
 /* show version info
@@ -289,7 +341,7 @@ static void usage (const char *errfmt, ...)
             fprintf (stderr, "Built as %s\n", our_make);
             fprintf (stderr, "Options:\n");
             fprintf (stderr, " -0   : remove eeprom file to restore all default values\n");
-            fprintf (stderr, " -a l : set gimbal trace level\n");
+            fprintf (stderr, " -a l : set debug level\n");
             fprintf (stderr, " -b h : set backend host:port to h; default is %s:%d\n", backend_host,
                                     backend_port);
             fprintf (stderr, " -d d : set working directory to d; default is %s\n", defaultAppDir().c_str());
@@ -302,10 +354,12 @@ static void usage (const char *errfmt, ...)
             fprintf (stderr, " -k   : start in normal mode, ie, don't offer Setup or wait for Skips\n");
             fprintf (stderr, " -l l : set Mercator or Robinson center longitude to l degrees, +E; requires -k\n");
             fprintf (stderr, " -m   : enable demo mode\n");
+            fprintf (stderr, " -n t : set live web idle timeout to t minutes; default forever\n");
             fprintf (stderr, " -o   : write diagnostic log to stdout instead of in %s\n",
                                     defaultAppDir().c_str());
             fprintf (stderr, " -p f : require passwords in file f formatted as lines of \"category password\"\n");
             fprintf (stderr, "        categories: changeUTC exit newde newdx reboot restart setup shutdown unlock upgrade\n");
+            fprintf (stderr, " -q   : ignore saved startup screen location and size\n");
             fprintf (stderr, " -r p : set read-only live web server port to p or -1 to disable; default %d\n",
                                     LIVEWEB_RO_PORT);
             fprintf (stderr, " -s d : start time as if UTC now is d formatted as YYYY-MM-DDTHH:MM:SS\n");
@@ -413,6 +467,14 @@ static void crackArgs (int ac, char *av[])
                 case 'm':
                     setDemoMode(true);
                     break;
+                case 'n':
+                    if (ac < 2)
+                        usage ("missing timeout for -n");
+                    liveweb_to = atoi(*++av);
+                    if (liveweb_to <= 0)
+                        usage ("-n timeout must be positive");
+                    ac--;
+                    break;
                 case 'o':
                     diag_to_file = false;
                     break;
@@ -422,6 +484,9 @@ static void crackArgs (int ac, char *av[])
                         usage ("missing file name for -p");
                     pw_file = *++av;
                     ac--;
+                    break;
+                case 'q':
+                    ignore_x11geom = true;
                     break;
                 case 'r':
                     if (ac < 2)
@@ -529,13 +594,8 @@ int main (int ac, char *av[])
         for (int i = 0; i < ac; i++)
             printf ("  argv[%d] = %s\n", i, av[i]);
 
-        // log our some info
-        printf ("process id %d\n", getpid());
-        printf ("built as %s\n", our_make);
-        printf ("working directory is %s\n", our_dir.c_str());
-        printf ("ruid %d euid %d\n", getuid(), geteuid());
-        if (pw_file)
-            capturePasswords (pw_file);
+        // log some sys info
+        logSys();
 
         // log os release, if available
         logOS();

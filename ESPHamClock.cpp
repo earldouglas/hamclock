@@ -5,9 +5,6 @@
 // glue
 #include "HamClock.h"
 
-// current version
-const char *hc_version = HC_VERSION;
-
 // clock, aux time and stopwatch boxes
 SBox clock_b = { 0, 65, 230, 49};
 SBox auxtime_b = { 0, 113, 205, 32};
@@ -27,9 +24,9 @@ SBox view_btn_b;                        // map View button
 SBox dx_maid_b;                         // dx maindenhead 
 SBox de_maid_b;                         // de maindenhead 
 
-// time zone boxes
-TZInfo de_tz = {{75, 158, 50, 17}, DE_COLOR, 0};
-TZInfo dx_tz = {{75, 307, 50, 17}, DX_COLOR, 0};
+// time zone state
+TZInfo de_tz = {{75, 158, 50, 17}, DE_COLOR, de_ll, true, 0};
+TZInfo dx_tz = {{75, 307, 50, 17}, DX_COLOR, dx_ll, true, 0};
 
 // NCDFX box, also used for brightness, on/off controls and space wx stats
 SBox NCDXF_b = {740, 0, 60, PLOTBOX123_H};
@@ -53,6 +50,9 @@ SCircle satpass_c;
 // whether to shade night or show place names
 uint8_t night_on, names_on;
 
+// handy flag when showing main page
+bool mainpage_up;
+
 // grid styles
 uint8_t mapgrid_choice;
 const char *grid_styles[MAPGRID_N] = {
@@ -73,11 +73,7 @@ const char *map_projnames[MAPP_N] = {
 };
 #undef X
 
-// info to display in the call sign GUI location -- the real call sign is always getCallsign()
-CallsignInfo cs_info;
-static const char on_air_msg[] = "ON THE AIR";  // used by setOnAir()
-#define ONAIR_FG        RA8875_WHITE            // fg color
-#define ONAIR_BG        RA8875_RED              // bg color
+// info to display below the call sign location
 static SBox uptime_b;                           // show up time, just below call
 #define UPTIME_INDENT   15                      // indent within uptime_b for "Up" label
 static SBox version_b;                          // show or check version, just below call
@@ -93,6 +89,16 @@ static MCPPoller onair_poller;                  // pin polling control
 SBox desrss_b, dxsrss_b;
 
 
+// rotate message below call sign through several display options
+typedef enum {
+    WDSP_RSSI,                                  // show RSSI
+    WDSP_LIP,                                   // show local IP
+    WDSP_PIP,                                   // show public IP
+    WDSP_CPUTEMP,                               // show CPU temperature
+    WDSP_N,                                     // n values
+} WiFiDisplay_t;
+static WiFiDisplay_t wdsp = WDSP_RSSI;
+
 // WiFi touch control
 TouchType wifi_tt;
 SCoord wifi_tt_s;
@@ -100,13 +106,15 @@ SCoord wifi_tt_s;
 // set up TFT display controller RA8875 instance on hardware SPI plus reset and chip select
 #define RA8875_RESET    16
 #define RA8875_CS       2
-Adafruit_RA8875_R tft(RA8875_CS, RA8875_RESET);
+Adafruit_RA8875 tft(RA8875_CS, RA8875_RESET);
 
 // MCP23017 driver
 Adafruit_MCP23X17 mcp;
 bool found_mcp;
 
-static uint32_t gpath_time;                     // millis() when great path was drawn, else 0
+// millis() when DE-DX was first drawn, else 0
+static uint32_t dxpath_time;
+#define DEDX_MINPATH    (200/pan_zoom.zoom)     // don't show DE-DX path if separated by less than this, miles
 
 // manage using a known DX cluster prefix or one derived from nearest LL
 static bool dx_prefix_use_override;             // whether to use dx_override_prefixp[] or ll2Prefix()
@@ -122,12 +130,6 @@ const char *detime_names[DETIME_N] = {
 };
 #undef X
 
-/* set DX-DE path no longer valid
- */
-void setDXPathInvalid()
-{
-    gpath_time = 0;
-}
 
 // these are needed for any normal C++ compiler, not that crazy Arduino IDE
 static void drawVersion(bool force);
@@ -135,12 +137,10 @@ static void checkTouch(void);
 static void drawUptime(bool force);
 static void drawWiFiInfo(void);
 static void toggleLockScreen(void);
-static void eraseDXPath(void);
-static void eraseDXMarker(void);
-static void drawRainbow (SBox &box);
 static void setDXPrefixOverride (const char *ovprefix);
 static void unsetDXPrefixOverride (void);
 static void runShutdownMenu(void);
+static bool checkOnAirPin (void);
 
 
 
@@ -213,12 +213,10 @@ static void showDefines(void)
     #if defined(_SUPPORT_KX3)
         _PR_MAC(_SUPPORT_KX3);
     #endif
-
-    #if defined(_SUPPORT_PHOT)
-        _PR_MAC(_SUPPORT_PHOT);
-    #endif
 }
 
+// flag to stop main loop by other threads
+static volatile bool stop_main_thread;
 
 // initial stack location
 char *stack_start;
@@ -254,16 +252,6 @@ void setup()
     }
     Serial.println("RA8875 found");
 
-    // must set rotation now from nvram setting .. too early to query setup options
-    // N.B. don't save in EEPROM yet.
-    uint8_t rot;
-    if (!NVReadUInt8 (NV_ROTATE_SCRN, &rot))
-        rot = 0;
-    tft.setRotation(rot ? 2 : 0);
-
-    // Adafruit's GFX defaults to wrap which breaks getTextBounds if string longer than tft.width()
-    tft.setTextWrap(false);
-
     // Adafruit assumed ESP8266 would run at 80 MHz, but we run it at 160
     extern uint32_t spi_speed;
     spi_speed *= 2;
@@ -273,11 +261,6 @@ void setup()
     tft.GPIOX(true); 
     tft.PWM1config(true, RA8875_PWM_CLK_DIV1024); // PWM output for backlight
     initBrightness();
-
-
-    // now can save rot so if commit fails screen is up for fatalError()
-    NVWriteUInt8 (NV_ROTATE_SCRN, rot);
-
 
 // #define _GFX_COORD_TEST                              // RBF
 #if defined(_GFX_COORD_TEST)
@@ -376,16 +359,17 @@ void setup()
     // enable touch screen system
     tft.touchEnable(true);
 
-#if defined(_IS_UNIX)
     // support live even in setup
     initLiveWeb(false);
-#endif
 
     // set up brb_rotset and brb_mode
     initBRBRotset();
 
     // run Setup at full brighness
     clockSetup();
+
+    // set desried gray display
+    tft.setGrayDisplay(getGrayDisplay());
 
     // init pan and zoom
     if (!NVReadUInt8 (NV_ZOOM, &pan_zoom.zoom)) {
@@ -400,6 +384,7 @@ void setup()
         pan_zoom.pan_y = 0;
         NVWriteInt16 (NV_PANY, pan_zoom.pan_y);
     }
+    normalizePanZoom(pan_zoom);
 
     // initialize MCP23017, fails gracefully so just log whether found
     found_mcp = mcp.begin_I2C();
@@ -417,9 +402,6 @@ void setup()
     // do not display time until all set up
     hideClocks();
 
-    // prep stopwatch
-    initStopwatch();
-
     // here we go
     eraseScreen();
 
@@ -428,7 +410,7 @@ void setup()
     cs_info.box.y = 10;                 // coordinate with tftMsg()
     cs_info.box.w = 512;
     cs_info.box.h = 50;
-    getDefaultCallsign();
+    initCallsignInfo();
     drawCallsign (true);
 
     // draw version just below
@@ -464,7 +446,7 @@ void setup()
     // wifi info box
     wifi_b.x = uptime_b.x + uptime_b.w;
     wifi_b.y = cs_info.box.y+cs_info.box.h+CSINFO_DROP;
-    wifi_b.w = 127;
+    wifi_b.w = 126;
     wifi_b.h = CSINFO_H;
 
     // version box
@@ -477,10 +459,13 @@ void setup()
     initSys();
 
     // get from nvram even if set prior from setup, geolocate or gpsd
-    NVReadInt32(NV_DE_TZ, &de_tz.tz_secs);
     NVReadFloat(NV_DE_LAT, &de_ll.lat_d);
     NVReadFloat(NV_DE_LNG, &de_ll.lng_d);
     normalizeLL(de_ll);
+    if (!NVReadTZ (NV_DE_TZ, de_tz)) {
+        setTZAuto (de_tz);
+        NVWriteTZ (NV_DE_TZ, de_tz);
+    }
 
     // ask to update if new version available -- never returns if update succeeds
     if (!skip_skip) {
@@ -564,23 +549,19 @@ void setup()
         dxsrss = DXSRSS_INAGO;
         NVWriteUInt8(NV_DX_SRSS, dxsrss);
     }
-    if (!NVReadFloat(NV_DX_LAT,&dx_ll.lat_d) || !NVReadFloat(NV_DX_LNG,&dx_ll.lng_d)) {
+    if (!NVReadFloat (NV_DX_LAT, &dx_ll.lat_d) || !NVReadFloat (NV_DX_LNG, &dx_ll.lng_d)
+                                               || !NVReadTZ (NV_DX_TZ, dx_tz)) {
         // if never set, default to 0/0
         dx_ll.lat_d = 0;
         dx_ll.lng_d = 0;
         NVWriteFloat (NV_DX_LAT, dx_ll.lat_d);
         NVWriteFloat (NV_DX_LNG, dx_ll.lng_d);
         setNVMaidenhead(NV_DX_GRID, dx_ll);
-        dx_tz.tz_secs = getTZ (dx_ll);
-        NVWriteInt32(NV_DX_TZ, dx_tz.tz_secs);
+        setTZAuto (dx_tz);
+        NVWriteTZ (NV_DX_TZ, dx_tz);
     }
-    dx_ll.lat = deg2rad(dx_ll.lat_d);
-    dx_ll.lng = deg2rad(dx_ll.lng_d);
+    normalizeLL (dx_ll);
     ll2s (dx_ll, dx_c.s, DX_R);
-    if (!NVReadInt32(NV_DX_TZ, &dx_tz.tz_secs)) {
-        dx_tz.tz_secs = getTZ (dx_ll);
-        NVWriteInt32(NV_DX_TZ, dx_tz.tz_secs);
-    }
 
     // sat pass circle
     satpass_c.r = dx_info_b.h/3 - 3;
@@ -634,6 +615,8 @@ void setup()
     // check for saved satellite
     dx_info_for_sat = initSatSelection();
 
+    // prep stopwatch
+    initStopwatch();
 
     // log screen lock
     Serial.printf ("Screen lock is now %s\n", screenIsLocked() ? "On" : "Off");
@@ -645,38 +628,45 @@ void setup()
 // called repeatedly forever
 void loop()
 {
-    // update stopwatch exclusively, if active
-    if (runStopwatch()) {
-        mainpage_up = false;                    // disable live web r/o marker
-        updateSatPass();                        // just for the satellite LED
+    // used by fatalError to stop main thread from scribbling over message
+    if (stop_main_thread)
         return;
+
+    // always do these
+    drawFireworks();                    // only new years midnight
+    updateSatPass ();                   // just for the satellite LED
+    checkDXCluster ();                  // collect new spots if running
+
+    // update stopwatch exclusively, if active
+    if (!runStopwatch()) {
+
+        // check on wifi including plots and NCDXF_b
+        updateWiFi();
+
+        // update clocks
+        updateClocks(false);
+
+        // update sat pass (this is just the pass; the path is recomputed before each map sweep)
+        updateSatPass();
+
+        // display more of earth map
+        drawMoreEarth();
+
+        // other goodies
+        drawUptime(false);
+        drawWiFiInfo();
+        drawVersion(false);
+        followBrightness();
+        checkOnAirPin();
+        readBME280();
+        runNextDemoCommand();
+        updateGPSDLoc();
+        updateNMEALoc();
+        pollRadio();
+
+        // check for touch events
+        checkTouch();
     }
-    mainpage_up = true;                         // ok to show liveweb r/o marker
-
-    // check on wifi including plots and NCDXF_b
-    updateWiFi();
-
-    // update clocks
-    updateClocks(false);
-
-    // update sat pass (this is just the pass; the path is recomputed before each map sweep)
-    updateSatPass();
-
-    // display more of earth map
-    drawMoreEarth();
-
-    // other goodies
-    drawUptime(false);
-    drawWiFiInfo();
-    drawVersion(false);
-    followBrightness();
-    checkOnAir();
-    readBME280();
-    runNextDemoCommand();
-    updateGPSDLoc();
-
-    // check for touch events
-    checkTouch();
 }
 
 
@@ -762,6 +752,9 @@ void initScreen()
     // erase entire screen
     eraseScreen();
 
+    // back to main page
+    mainpage_up = true;
+
     // set protected region, which requires explicit call to tft.drawPR() to update
     tft.setPR (map_b.x, map_b.y, map_b.w, map_b.h);
 
@@ -791,8 +784,7 @@ void initScreen()
     drawUptime(true);
     drawScreenLock();
 
-    // always close these so they will restart if open in any pane
-    closeDXCluster();
+    // always close so it will restart if open in any pane
     closeGimbal();
 
     // flush any stale touchs
@@ -842,11 +834,9 @@ static void checkTouch()
         // set flag to draw map menu at next opportunity
         mapmenu_pending = true;
     } else if (!dx_info_for_sat && checkSatMapTouch (s)) {
-        // show sat in DX if not already 
+        // set showing sat in DX box
         dx_info_for_sat = true;
         drawSatPass();
-        eraseDXPath();                                          // declutter to emphasize sat track
-        drawAllSymbols();
     } else if (!overViewBtn(s, DX_R) && s2ll (s, ll)) {
         // tapped map: set flag to run popup after map finishes or set newDX here if special-tap
         if (names_on)
@@ -868,32 +858,24 @@ static void checkTouch()
         updateClocks(true);
     } else if (!SHOWING_PANE_0() && inBox (s, de_tz.box)) {
         if (TZMenu (de_tz, de_ll)) {
-            NVWriteInt32 (NV_DE_TZ, de_tz.tz_secs);
-            drawTZ (de_tz);
+            NVWriteTZ (NV_DE_TZ, de_tz);
             scheduleNewPlot(PLOT_CH_MOON);
             scheduleNewPlot(PLOT_CH_SDO);
             scheduleNewPlot(PLOT_CH_BC);
         }
-        drawDEInfo();   // erase regardless
+        drawDEInfo();   // restore regardless
     } else if (!SHOWING_PANE_0() && !dx_info_for_sat && inBox (s, dx_tz.box)) {
-        if (TZMenu (dx_tz, dx_ll)) {
-            NVWriteInt32 (NV_DX_TZ, dx_tz.tz_secs);
-            drawTZ (dx_tz);
-        }
+        if (TZMenu (dx_tz, dx_ll))
+            NVWriteTZ (NV_DX_TZ, dx_tz);
         drawDXInfo();   // restore regardless
-    } else if (checkCallsignTouchFG(s)) {
-        NVWriteUInt16 (NV_CALL_FG_COLOR, cs_info.fg_color);
-        drawCallsign (false);   // just foreground
-    } else if (checkCallsignTouchBG(s)) {
-        NVWriteUInt16 (NV_CALL_BG_COLOR, cs_info.bg_color);
-        NVWriteUInt8 (NV_CALL_BG_RAINBOW, cs_info.bg_rainbow);
-        drawCallsign (true);    // fg and bg
+    } else if (inBox (s, cs_info.box)) {
+        doCallsignTouch (s);
     } else if (!SHOWING_PANE_0() && !dx_info_for_sat && checkPathDirTouch(s)) {
         show_lp = !show_lp;
         NVWriteUInt8 (NV_LP, show_lp);
         drawDXInfo ();
         scheduleNewPlot(PLOT_CH_BC);
-        scheduleNewVOACAPMap(prop_map);
+        scheduleNewCoreMap(core_map);
     } else if (!SHOWING_PANE_0() && inBox (s, askde_b)) {
         // N.B. askde overlaps the desrss box
         if (de_time_fmt == DETIME_INFO && inBox (s, desrss_b)) {
@@ -954,9 +936,21 @@ static void checkTouch()
         }
         initScreen();
     } else if (inBox (s, wifi_b)) {
-        int rssi;
-        if (readWiFiRSSI(rssi))
-            rssi_avg = runWiFiMeter (false, rssi_ignore);     // full effect of last reading
+        // depends on what is currently displayed
+        switch (wdsp) {
+        case WDSP_RSSI:
+            runWiFiMeter (false, rssi_ignore);
+            break;
+        case WDSP_LIP:
+            break;
+        case WDSP_PIP:
+            break;
+        case WDSP_CPUTEMP:
+            plotCPUTempHistory();
+            break;
+        case WDSP_N:
+            break;
+        }
     } else if (overRSS(s)) {
         checkRSSTouch();
     }
@@ -982,7 +976,6 @@ void normalizeLL (LatLong &ll)
  */
 void newDX (LatLong &ll, const char grid[MAID_CHARLEN], const char *ovprefix)
 {
-
     // require password if set
     if (!askPasswd("newdx", true))
         return;
@@ -999,16 +992,16 @@ void newDX (LatLong &ll, const char grid[MAID_CHARLEN], const char *ovprefix)
         NVWriteString (NV_DX_GRID, grid);
     else
         setNVMaidenhead (NV_DX_GRID, ll);
-    dx_tz.tz_secs = getTZ (ll);
-    NVWriteInt32(NV_DX_TZ, dx_tz.tz_secs);
-
-    // erase previous DX info
-    eraseDXPath ();
-    eraseDXMarker ();
+    setTZAuto (dx_tz);
+    NVWriteTZ (NV_DX_TZ, dx_tz);
 
     // set new location
     dx_ll = ll;
     ll2s (dx_ll, dx_c.s, DX_R);
+
+    // persist
+    NVWriteFloat (NV_DX_LAT, dx_ll.lat_d);
+    NVWriteFloat (NV_DX_LNG, dx_ll.lng_d);
 
     // set DX prefix
     if (ovprefix)
@@ -1016,24 +1009,16 @@ void newDX (LatLong &ll, const char grid[MAID_CHARLEN], const char *ovprefix)
     else
         unsetDXPrefixOverride();
 
-    // draw in new location and update info
-    drawDXPath ();
-    gpath_time = millis();
+    // enable great path unless very close to DE
+    dxpath_time = ERAD_M * simpleSphereDist (dx_ll, de_ll) > DEDX_MINPATH ? millis() : 0;
+
+    // just call initEarthMap??
     drawDXInfo ();
     drawAllSymbols();
-
-    // TODO: why draw it at all?? Was this an ESP thing?
-    // don't draw if prefix from cluster because it draws also
-    // if (!dx_prefix_use_override)
-        // drawDXCursorPrefix();
 
     // show DX weather and update band conditions if showing
     scheduleNewPlot(PLOT_CH_BC);
     scheduleNewPlot(PLOT_CH_DXWX);
-
-    // persist
-    NVWriteFloat (NV_DX_LAT, dx_ll.lat_d);
-    NVWriteFloat (NV_DX_LNG, dx_ll.lng_d);
 
     // log
     char dx_grid[MAID_CHARLEN];
@@ -1045,7 +1030,6 @@ void newDX (LatLong &ll, const char grid[MAID_CHARLEN], const char *ovprefix)
  */
 void newDE (LatLong &ll, const char grid[MAID_CHARLEN])
 {
-
     // require password if set
     if (!askPasswd("newde", true))
         return;
@@ -1056,60 +1040,32 @@ void newDE (LatLong &ll, const char grid[MAID_CHARLEN])
         NVWriteString (NV_DE_GRID, grid);
     else
         setNVMaidenhead (NV_DE_GRID, ll);
-    de_tz.tz_secs = getTZ (ll);
-    NVWriteInt32(NV_DE_TZ, de_tz.tz_secs);
+    setTZAuto (de_tz);
+    NVWriteTZ (NV_DE_TZ, de_tz);
 
     // sat path will change, stop gimbal and require op to start
     stopGimbalNow();
 
-    if (map_proj == MAPP_AZIMUTHAL || map_proj == MAPP_AZIM1 ) {
+    // new DE
+    de_ll = ll;
 
-        // must start over because everything moves to keep new DE centered
-
-        drawDEMarker(false);
-        de_ll = ll;
-
-        // prep for all new map
-        initEarthMap();
-
-    } else {
-
-        // for mercator|moll we try harder to just update the minimum .. lazy way is just call initEarthMap
-
-        // erase current markers
-        eraseDXPath();
-        eraseDEMarker();
-        eraseDEAPMarker();
-        eraseDXMarker();
-
-        // set new
-        de_ll = ll;
-        sdelat = sinf(de_ll.lat);
-        cdelat = cosf(de_ll.lat);
-        ll2s (de_ll, de_c.s, DE_R);
-        antipode (deap_ll, de_ll);
-        ll2s (deap_ll, deap_c.s, DEAP_R);
-
-        // draw in new location and update info
-        drawDEInfo();
-        drawDXInfo();   // heading changes
-        drawAllSymbols();
-        
-        // update lunar info
-        getLunarCir (nowWO(), de_ll, lunar_cir);
-    }
+    // intentionally do not show great path to DX when changing DE
+    dxpath_time = 0;
 
     // persist
     NVWriteFloat (NV_DE_LAT, de_ll.lat_d);
     NVWriteFloat (NV_DE_LNG, de_ll.lng_d);
+
+    // new map
+    initEarthMap();
 
     // more updates that depend on DE regardless of projection
     scheduleNewPlot(PLOT_CH_MOON);
     scheduleNewPlot(PLOT_CH_SDO);
     scheduleNewPlot(PLOT_CH_BC);
     scheduleNewPlot(PLOT_CH_PSK);
-    scheduleNewVOACAPMap(prop_map);
     scheduleNewPlot(PLOT_CH_DEWX);
+    scheduleNewCoreMap(core_map);
     sendDXClusterDELLGrid();
     if (setNewSatCircumstance())
         drawSatPass();
@@ -1119,143 +1075,7 @@ void newDE (LatLong &ll, const char grid[MAID_CHARLEN])
     getNVMaidenhead (NV_DE_GRID, de_grid);
     Serial.printf ("New DE: %g %g %s\n", de_ll.lat_d, de_ll.lng_d, de_grid);
 }
-
-/* return next color after current in basic series of primary colors that is nicely different from contrast.
- */
-static uint16_t getNextColor (uint16_t current, uint16_t contrast)
-{
-    static uint16_t colors[] = {
-        RA8875_RED, RA8875_GREEN, RA8875_BLUE, RA8875_CYAN,
-        RA8875_MAGENTA, RA8875_YELLOW, RA8875_WHITE, RA8875_BLACK,
-        DE_COLOR
-    };
-    #define NCOLORS NARRAY(colors)
-    
-    // find index of current color, ok if not found
-    unsigned current_i;
-    for (current_i = 0; current_i < NCOLORS; current_i++)
-        if (colors[current_i] == current)
-            break;
-
-    // scan forward from current until find one nicely different from contrast
-    for (unsigned cdiff_i = 1; cdiff_i < NCOLORS; cdiff_i++) {
-        uint16_t next_color = colors[(current_i + cdiff_i) % NCOLORS];
-
-        // certainly doesn't work if same as contrast
-        if (next_color == contrast)
-            continue;
-
-        // continue scanning if bad combination
-        switch (next_color) {
-        case RA8875_RED:
-            if (contrast == RA8875_MAGENTA || contrast == DE_COLOR)
-                continue;
-            break;
-        case RA8875_GREEN:      // fallthru
-        case RA8875_BLUE:
-            if (contrast == RA8875_CYAN)
-                continue;
-            break;
-        case RA8875_CYAN:
-            if (contrast == RA8875_GREEN || contrast == RA8875_BLUE)
-                continue;
-            break;
-        case RA8875_MAGENTA:
-            if (contrast == RA8875_RED || contrast == DE_COLOR)
-                continue;
-            break;
-        case RA8875_YELLOW:
-            if (contrast == RA8875_WHITE)
-                continue;
-            break;
-        case RA8875_WHITE:
-            if (contrast == RA8875_YELLOW)
-                continue;
-            break;
-        case RA8875_BLACK:
-            // black goes with anything
-            break;
-        case DE_COLOR:
-            if (contrast == RA8875_RED || contrast == RA8875_MAGENTA)
-                continue;
-            break;
-        }
-
-        // no complaints
-        return (next_color);
-    }
-
-    // default 
-    return (colors[0]);
-}
  
-/* given a touch location check if Op wants to change callsign fg.
- * if so then update cs_info and return true else false.
- */
-bool checkCallsignTouchFG (SCoord &b)
-{
-    SBox left_half = cs_info.box;
-    left_half.w /=2;
-
-    if (inBox (b, left_half)) {
-        // change fg
-        uint16_t bg = cs_info.bg_rainbow ? RA8875_BLACK : cs_info.bg_color;
-        cs_info.fg_color = getNextColor (cs_info.fg_color, bg);
-        return (true);
-    }
-    return (false);
-}
-
-
-/* given a touch location check if Op wants to change callsign bg.
- * if so then update cs_info and return true else false.
- */
-bool checkCallsignTouchBG (SCoord &b)
-{
-    SBox right_half = cs_info.box;
-    right_half.w /=2;
-    right_half.x += right_half.w;
-
-    if (inBox (b, right_half)) {
-        // change bg, cycling through rainbow when current color is white
-        if (cs_info.bg_rainbow) {
-            cs_info.bg_rainbow = false;
-            cs_info.bg_color = getNextColor (cs_info.bg_color, cs_info.fg_color);
-        } else if (cs_info.bg_color == RA8875_WHITE) {
-            cs_info.bg_rainbow = true;
-            // leave cs_info.bg_color to resume color scan when rainbow turned off
-        } else {
-            cs_info.bg_color = getNextColor (cs_info.bg_color, cs_info.fg_color);
-        }
-        return (true);
-    }
-    return (false);
-}
-
-/* erase the DX marker by restoring map
- */
-static void eraseDXMarker()
-{
-    // check for being off zoomed mercator map
-    if (dx_c.s.x == 0)
-        return;
-
-    eraseSCircle (dx_c);
-
-    // restore sat name in case hit
-    for (int16_t dy = -dx_c.r; dy <= dx_c.r; dy++)
-        drawSatNameOnRow (dx_c.s.y+dy);
-}
-
-/* erase great circle through DE and DX by restoring map at each entry in gpath[] then forget.
- * we also erase the box used to display the prefix
- */
-static void eraseDXPath()
-{
-    // mark no longer active
-    setDXPathInvalid();
-}
-
 /* find long- or short-path angular distance and east-of-north bearing from_ll to_ll given helper
  * values for sin and cos of from lat. all values in radians in range 0..2pi.
  */
@@ -1305,13 +1125,10 @@ bool desiredBearing (const LatLong &ll, float &bear)
     return (false);
 }
 
-/* draw great circle through DE and DX.
- * ESP uses points and saves screen coords in gpath[] so they can be selectively erase; UNIX draws
- *   with connected line segments because they need never be erased.
+/* draw great circle through DE and DX unless too close
  */
 void drawDXPath ()
 {
-
     // find short-path bearing and distance from DE to DX
     float dist, bear;
     propDEPath (false, dx_ll, &dist, &bear);
@@ -1319,19 +1136,23 @@ void drawDXPath ()
     // walk great circle path from DE through DX with segment lengths PATH_SEGLEN
     float ca, B;
     SCoord s0 = {0, 0}, s1;
-    uint16_t short_col = getMapColor(SHORTPATH_CSPR);
-    uint16_t long_col = getMapColor(LONGPATH_CSPR);
-    bool sp_dashed = getColorDashed(SHORTPATH_CSPR);
-    bool lp_dashed = getColorDashed(LONGPATH_CSPR);
+    uint16_t sp_col = getMapColor(SHORTPATH_CSPR);
+    uint16_t lp_col = getMapColor(LONGPATH_CSPR);
+    bool sp_dashed = getPathDashed(SHORTPATH_CSPR);
+    bool lp_dashed = getPathDashed(LONGPATH_CSPR);
+    int sp_wid = getRawPathWidth(SHORTPATH_CSPR);
+    int lp_wid = getRawPathWidth(LONGPATH_CSPR);
+    int edge = (sp_wid > lp_wid ? sp_wid : lp_wid) + 2;
     bool dash_toggle = false;
     for (float b = 0; b < 2*M_PIF; b += deg2rad(PATH_SEGLEN)) {
         solveSphere (bear, b, sdelat, cdelat, &ca, &B);
-        ll2sRaw (asinf(ca), fmodf(de_ll.lng+B+5*M_PIF,2*M_PIF)-M_PIF, s1, 1);
-        bool show_seg = b < dist ? (!sp_dashed || dash_toggle) : (!lp_dashed || dash_toggle);
+        ll2sRaw (asinf(ca), fmodf(de_ll.lng+B+5*M_PIF,2*M_PIF)-M_PIF, s1, edge);
+        bool sp = b < dist;
+        bool show_seg= sp ? (sp_wid && (!sp_dashed || dash_toggle)) : (lp_wid && (!lp_dashed || dash_toggle));
         if (s0.x) {
             if (segmentSpanOkRaw (s0, s1, tft.SCALESZ)) {
                 if (show_seg)
-                    tft.drawLineRaw (s0.x, s0.y, s1.x, s1.y, tft.SCALESZ, b < dist ? short_col : long_col);
+                    tft.drawLineRaw (s0.x, s0.y, s1.x, s1.y, sp ? sp_wid : lp_wid, sp ? sp_col : lp_col);
             } else {
                 s1.x = 0;
             }
@@ -1342,79 +1163,21 @@ void drawDXPath ()
 }
 
 /* return whether we are waiting for a DX path to linger.
- * also erase path if its linger time just expired.
  */
 bool waiting4DXPath()
 {
-    if (gpath_time == 0)
-        return (false);
-
-    if (timesUp (&gpath_time, DXPATH_LINGER)) {
-        eraseDXPath();          // sets no longer valid
-        drawAllSymbols();
-        return (false);
-    }
-
-    return (true);
+    return (dxpath_time > 0 && millis() - dxpath_time < DXPATH_LINGER);
 }
 
-
-/* set/restore the default callsign and colors.
- * N.B. this one sets up cs_info, we do not draw
- */
-void getDefaultCallsign()
-{
-    free (cs_info.call);
-    cs_info.call = strdup(getCallsign());
-    if (!NVReadUInt16 (NV_CALL_FG_COLOR, &cs_info.fg_color)) {
-        cs_info.fg_color = RA8875_BLACK;
-        NVWriteUInt16 (NV_CALL_FG_COLOR, cs_info.fg_color);
-    }
-    if (!NVReadUInt16 (NV_CALL_BG_COLOR, &cs_info.bg_color)) {
-        cs_info.bg_color = RA8875_WHITE;
-        NVWriteUInt16 (NV_CALL_BG_COLOR, cs_info.bg_color);
-    }
-    if (!NVReadUInt8 (NV_CALL_BG_RAINBOW, &cs_info.bg_rainbow)) {
-        cs_info.bg_rainbow = 1;
-        NVWriteUInt8 (NV_CALL_BG_RAINBOW, cs_info.bg_rainbow);
-    }
-}
-
-/* set ON AIR message in callsign area else restore normal call sign
- */
-void setOnAir (bool on)
-{
-    if (on) {
-        free (cs_info.call);
-        cs_info.call = strdup (on_air_msg);
-        cs_info.fg_color = ONAIR_FG;
-        cs_info.bg_color = ONAIR_BG;
-        cs_info.bg_rainbow = 0;
-    } else {
-        getDefaultCallsign();
-    }
-
-    drawCallsign (true);
-}
 
 /* change call sign to ON AIR as long as ONAIR_PIN is low
  */
-bool checkOnAir()
+static bool checkOnAirPin()
 {
-    // only draw when changes
-    static bool prev_on;
-
     // switch is grounded when active
-    bool on = !readMCPPoller (onair_poller);
-
-    if (on && !prev_on)
-        setOnAir(true);
-    else if (!on && prev_on)
-        setOnAir(false);
-
-    prev_on = on;
-
-    return (on);
+    bool on_now = !readMCPPoller (onair_poller);
+    setOnAirHW (on_now);
+    return (on_now);
 }
 
 // handy
@@ -1448,134 +1211,16 @@ void shadowString (const char *str, bool shadow, uint16_t color, uint16_t x0, ui
     tft.print (str);
 }
 
-/* draw the given string centered in the given box using the current font and given color.
- * if it fits in one line, set y to box.y + l1dy.
- * if fits as two lines draw set their y to box.y + l12dy and l22dy.
- * if latter two are 0 then don't even try 2 lines.
- * if it won't fit in 2 lines and anyway is set, draw as much as possible.
- * if shadow then draw a black background shadow.
- * return whether it all fit some way.
- */
-static bool drawBoxText (bool anyway, const SBox &box, const char *str, uint16_t color,
-uint16_t l1dy, uint16_t l12dy, uint16_t l22dy, bool shadow)
-{
-    // try as one line
-    uint16_t w = getTextWidth (str);
-    if (w < box.w) {
-        shadowString (str, shadow, color, box.x + (box.w-w)/2, box.y + l1dy);
-        return (true);
-    }
-
-    // bale if don't even want to try 2 lines
-    if (l12dy == 0 || l22dy == 0)
-        return (false);
-
-    // try splitting into 2 lines
-    StackMalloc str_copy0(str);
-    char *s0 = (char *) str_copy0.getMem();
-    for (char *space = strrchr (s0,' '); space; space = strrchr (s0,' ')) {
-        *space = '\0';
-        uint16_t w0 = getTextWidth (s0);
-        if (w0 < box.w) {
-            char *s1 = space + 1;
-            strcpy (s1, str + (s1 - s0));               // restore zerod spaces
-            uint16_t w1 = getTextWidth (s1);
-            if (w1 < box.w) {
-                // 2 lines fit
-                shadowString (s0, shadow, color, box.x + (box.w - w0)/2, box.y + l12dy);
-                shadowString (s1, shadow, color, box.x + (box.w - w1)/2, box.y + l22dy);
-                return (true);
-            } else if (anyway) {
-                // print 1st line and as AMAP of 2nd
-                shadowString (s0, shadow, color, box.x + (box.w - w0)/2, box.y + l12dy);
-                w1 = maxStringW (s1, box.w);
-                shadowString (s1, shadow, color, box.x + (box.w - w1)/2, box.y + l22dy);
-                return (false);
-            }
-        }
-    }
-
-    // no way
-    return (false);
-}
-
-/* draw callsign using cs_info.
- * draw everything if all, else just fg text.
- */
-void drawCallsign (bool all)
-{
-    tft.graphicsMode();
-
-    if (all) {
-        if (cs_info.bg_rainbow)
-            drawRainbow (cs_info.box);
-        else
-            fillSBox (cs_info.box, cs_info.bg_color);
-    }
-
-    tft.setTextColor(cs_info.fg_color);
-
-    // make copy in order to replace each 0 with del which is modified to be a slashed-0 in BOLD/LARGE
-    StackMalloc call_slash0(cs_info.call);
-    char *slash0 = (char *) call_slash0.getMem();
-    for (char *z = slash0; *z != '\0' ; z++) {
-        if (*z == '0')
-            *z = 127;   // del
-    }
-
-    // make a copy with all upper case to try two lines using SMALL font (avoids descenders)
-    StackMalloc call_uc(cs_info.call);
-    char *uc = (char *) call_uc.getMem();
-    for (char *z = uc; *z != '\0' ; z++)
-        *z = toupper(*z);
-
-
-    // keep shrinking font and trying 2 lines until fits
-    const SBox &box = cs_info.box;              // handier
-    uint16_t fg_c = cs_info.fg_color;           // handy
-    bool sh = cs_info.bg_rainbow;               // shadow only if bg is rainbow
-    selectFontStyle (BOLD_FONT, LARGE_FONT);
-    if (!drawBoxText (false, box, slash0, fg_c, box.h/2+20, 0, 0, sh)) {
-        // try smaller font
-        selectFontStyle (BOLD_FONT, SMALL_FONT);
-        if (!drawBoxText (false, box, cs_info.call, fg_c, box.h/2+10, 0, 0, sh)) {
-            // try smaller font
-            selectFontStyle (LIGHT_FONT, SMALL_FONT);
-            if (!drawBoxText (false, box, cs_info.call, fg_c, box.h/2+10, 0, 0, sh)) {
-                // try all upper case to allow 2 lines with regard to descenders
-                if (!drawBoxText (false, box, uc, fg_c, box.h/2+10, box.h/2-2, box.h-3, sh)) {
-                    // try smallest font
-                    selectFontStyle (LIGHT_FONT, FAST_FONT);
-                    (void) drawBoxText (true, box, cs_info.call, fg_c, box.h/2-10, box.h/2-14, box.h/2+4, sh);
-                }
-            }
-        }
-    }
-}
-
-/* draw full spectrum in the given box.
- */
-static void drawRainbow (SBox &box)
-{
-    uint8_t x0 = random(box.w);
-
-    tft.graphicsMode();
-    for (uint16_t x = box.x; x < box.x+box.w; x++) {
-        uint8_t h = 255*((x+x0-box.x)%box.w)/box.w;
-        tft.fillRect (x, box.y, 1, box.h, HSV_2_RGB565(h,255,255));
-    }
-}
-
 /* draw version just below cs_info if time to recheck or force
  */
 static void drawVersion(bool force)
 {
-    // how often to check for new version
-    #define VER_CHECK_DT    (6*3600*1000UL)         // millis
+    // how often to check for new version -- check much more often when we are beta
+    const uint32_t check_dt = strchr (hc_version, 'b') ? 5*60*1000UL : 6*3600*1000UL;   // millis
 
     // get out fast if nothing to do yet
     static uint32_t check_t;
-    if (!timesUp (&check_t, VER_CHECK_DT) && !force)
+    if (!timesUp (&check_t, check_dt) && !force)
         return;
 
     // check for new version and reset timeout
@@ -1586,7 +1231,7 @@ static void drawVersion(bool force)
     // show current version, but highlight if new version is available
     uint16_t col = new_avail ? RA8875_RED : GRAY;
     selectFontStyle (LIGHT_FONT, FAST_FONT);
-    snprintf (line, sizeof(line), "V %s", hc_version);
+    snprintf (line, sizeof(line), "V%s", hc_version);
     uint16_t vw = getTextWidth (line);
     tft.setTextColor (col);
     tft.setCursor (version_b.x+version_b.w-vw, version_b.y+1);        // right justify
@@ -1595,37 +1240,32 @@ static void drawVersion(bool force)
     tft.print (line);
 }
 
-/* draw wifi signal strength or IP occasionally below cs_info
+/* draw wifi signal strength or IP or CPU temp occasionally below cs_info
  */
 static void drawWiFiInfo()
 {
-
-    // just once every few seconds, wary about overhead calling RSSI()
+    // just once every few seconds is fine
     static uint32_t prev_ms;
     if (!timesUp(&prev_ms, 5000))
         return;
 
-    // message, if [0] != 0
-    selectFontStyle (LIGHT_FONT, FAST_FONT);
+    // default color, cases might change
     tft.setTextColor (GRAY);
-    char str[40];
-    str[0] = '\0';
 
-    // rotate through several display options
+    // rotate through the possibilities until one works, ie, puts something into str[]
+    // N.B. we assume at least one case will set this!
+    char str[40] = "";                          // \0 until known
 
-    typedef enum {
-        WDSP_RSSI,                      // show RSSI
-        WDSP_LIP,                       // show local IP
-        WDSP_PIP                        // show public IP
-    } WiFiDisplay_t;
+    do {
 
-    static WiFiDisplay_t wdsp = WDSP_RSSI;
+        // next
+        wdsp = (WiFiDisplay_t)((((int)wdsp)+1) % WDSP_N);
 
-    switch (wdsp) {
+        switch (wdsp) {
 
-    case WDSP_RSSI: {
+        case WDSP_RSSI: {
 
-            static int prev_logv;           // for only logging large changes
+            static int prev_logv;               // only log large changes
 
             // read
             int rssi;
@@ -1638,7 +1278,7 @@ static void drawWiFiInfo()
 
                 // show meter if too low unless ignored
                 if (!rssi_ignore && rssi_avg < MIN_WIFI_RSSI)
-                    rssi_avg = runWiFiMeter (true, rssi_ignore);     // full effect of last reading
+                    runWiFiMeter (true, rssi_ignore);
 
                 // display value
                 snprintf (str, sizeof(str), "WiFi %4d dBm", rssi_avg);
@@ -1650,60 +1290,64 @@ static void drawWiFiInfo()
                     prev_logv = rssi_avg;
                 }
             }
-        }
+            }
 
-        // rotate next
-        wdsp = WDSP_LIP;
+            break;
 
-        break;
-
-    case WDSP_LIP:
-
-        {
+        case WDSP_LIP: {
 
             IPAddress ip = WiFi.localIP();
             bool net_ok = ip[0] != '\0';
             if (net_ok) {
                 snprintf (str, sizeof(str), "L-IP %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-                tft.setTextColor (GRAY);
             } else {
                 strcpy (str, "No Network");
                 tft.setTextColor (RA8875_RED);
             }
-        }
-
-        // rotate next
-        wdsp = WDSP_PIP;
-
-        break;
-
-    case WDSP_PIP:
-
-        if (showPIP()) {
-            if (remote_addr[0]) {
-                snprintf (str, sizeof(str), "P-IP %s", remote_addr);
-                tft.setTextColor (GRAY);
-            } else {
-                strcpy (str, "No Network");
-                tft.setTextColor (RA8875_RED);
             }
+
+            break;
+
+        case WDSP_PIP:
+
+            if (showPIP()) {
+                if (remote_addr[0]) {
+                    snprintf (str, sizeof(str), "P-IP %s", remote_addr);
+                } else {
+                    strcpy (str, "No Network");
+                    tft.setTextColor (RA8875_RED);
+                }
+            }
+
+            break;
+
+        case WDSP_CPUTEMP: {
+
+            float T;
+            if (getCPUTemp (T)) {
+                if (showTempC())
+                    snprintf (str, sizeof(str), "CPU %.2f C", T);
+                else
+                    snprintf (str, sizeof(str), "CPU %.2f F", 1.8F*T+32);
+            }
+            }
+
+            break;
+
+        case WDSP_N:
+            // lint -- never get here
+            break;
+
         }
 
-        // rotate next
-        wdsp = WDSP_RSSI;
+    } while (str[0] == '\0');                                   // try another until one works
 
-        break;
-
-    }
-
-    // show if successful
-    if (str[0]) {
-        uint16_t sw = getTextWidth(str);
-        fillSBox (wifi_b, RA8875_BLACK);
-        // drawSBox (wifi_b, RA8875_GREEN);                // RBF
-        tft.setCursor (wifi_b.x+(wifi_b.w-sw)/2, wifi_b.y+1);
-        tft.print(str);
-    }
+    // show
+    selectFontStyle (LIGHT_FONT, FAST_FONT);
+    uint16_t sw = getTextWidth(str);
+    fillSBox (wifi_b, RA8875_BLACK);
+    tft.setCursor (wifi_b.x+(wifi_b.w-sw)/2, wifi_b.y+1);
+    tft.print(str);
 }
 
 /* set Up label and erase current time in uptime_b.
@@ -1792,12 +1436,19 @@ static void drawUptime(bool force)
             tft.printf ("%2dh %2dm", hrs, mins);
             prev_m = mins;
         }
-    } else {
-        if (hrs != prev_h || force) {
+    } else if (upsecs < SECSPERDAY+60) {
+        prepUptime();
+        tft.printf ("%2dd %2ds", days, secs);
+    } else if (upsecs < SECSPERDAY+3600) {
+        if (mins != prev_m || force) {
             prepUptime();
-            tft.printf ("%6dd", days);
-            prev_h = hrs;
+            tft.printf ("%2dd %2dm", days, mins);
+            prev_m = mins;
         }
+    } else if (hrs != prev_h || force) {
+        prepUptime();
+        tft.printf ("%2dd %2dh", days, hrs);
+        prev_h = hrs;
     }
 }
 
@@ -2022,7 +1673,7 @@ void setScreenLock (bool on)
     if (on != screenIsLocked()) {
         toggleLockScreen();
         // ?? setDemoMode (false);
-        if (getSWDisplayState() == SWD_NONE)
+        if (mainpage_up)
             drawScreenLock();
     }
 }
@@ -2064,7 +1715,10 @@ void drawDEFormatMenu()
     const int mi = 2;
     const int Mi = 8;
 
-    MenuItem mitems[13] = {
+    // number of core menu items
+    #define N_DEFMT_CORE        8
+
+    MenuItem mitems[N_DEFMT_CORE+N_PANE_0_CH] = {
 
         // outer menu is whether to display the DE pane or use both DE+DX for a pane choice
         {MENU_1OFN, !SHOWING_PANE_0(), 1, mi, "DE format:"},
@@ -2084,35 +1738,24 @@ void drawDEFormatMenu()
 
     };
 
-    PlotPane pp = findPaneForChoice (PLOT_CH_ADIF);
-    bool available =  plotChoiceIsAvailable(PLOT_CH_ADIF) && (pp == PANE_NONE || pp == PANE_0);
-    MenuFieldType type = available ? MENU_AL1OFN : MENU_IGNORE;
-    mitems[8] = {type, !!(plot_rotset[PANE_0] & (1<<PLOT_CH_ADIF)), 3, Mi, plot_names[PLOT_CH_ADIF]};
-
-
-    pp = findPaneForChoice (PLOT_CH_CONTESTS);
-    available = plotChoiceIsAvailable(PLOT_CH_CONTESTS) && (pp == PANE_NONE || pp == PANE_0);
-    type = available ? MENU_AL1OFN : MENU_IGNORE;
-    mitems[9] = {type, !!(plot_rotset[PANE_0] & (1<<PLOT_CH_CONTESTS)), 3, Mi, plot_names[PLOT_CH_CONTESTS]};
-
-
-    pp = findPaneForChoice (PLOT_CH_DXCLUSTER);
-    available = plotChoiceIsAvailable(PLOT_CH_DXCLUSTER) && (pp == PANE_NONE || pp == PANE_0);
-    type = available ? MENU_AL1OFN : MENU_IGNORE;
-    mitems[10] = {type, !!(plot_rotset[PANE_0] & (1<<PLOT_CH_DXCLUSTER)), 3,Mi,plot_names[PLOT_CH_DXCLUSTER]};
-
-
-    pp = findPaneForChoice (PLOT_CH_POTA);
-    available = plotChoiceIsAvailable(PLOT_CH_POTA) && (pp == PANE_NONE || pp == PANE_0);
-    type = available ? MENU_AL1OFN : MENU_IGNORE;
-    mitems[11] = {type, !!(plot_rotset[PANE_0] & (1<<PLOT_CH_POTA)), 3, Mi, plot_names[PLOT_CH_POTA]};
-
-
-    pp = findPaneForChoice (PLOT_CH_SOTA);
-    available = plotChoiceIsAvailable(PLOT_CH_SOTA) && (pp == PANE_NONE || pp == PANE_0);
-    type = available ? MENU_AL1OFN : MENU_IGNORE;
-    mitems[12] = {type, !!(plot_rotset[PANE_0] & (1<<PLOT_CH_SOTA)), 3, Mi, plot_names[PLOT_CH_SOTA]};
-
+    // set and record PANE_0 choices from successive bits in PANE_0_CH_MASK
+    uint32_t pane_0_bits = PANE_0_CH_MASK;
+    PlotChoice menu_ch[N_PANE_0_CH];
+    for (int i = 0; i < N_PANE_0_CH; i++) {
+        // find and zero out the next bit in mask of possible PANE_0 panes
+        int plot_n = 0;
+        for (uint32_t bits = pane_0_bits; bits >>= 1; plot_n++)
+            continue;
+        pane_0_bits &= ~(1<<plot_n);
+        menu_ch[i] = (PlotChoice)plot_n;
+        // prepare menu item
+        PlotPane pp = findPaneForChoice ((PlotChoice)plot_n);
+        bool available =  plotChoiceIsAvailable((PlotChoice)plot_n) && (pp == PANE_NONE || pp == PANE_0);
+        MenuFieldType type = available ? MENU_AL1OFN : MENU_IGNORE;
+        mitems[N_DEFMT_CORE+i] = {type, !!(plot_rotset[PANE_0] & (1<<plot_n)), 3, Mi, plot_names[plot_n]};
+    }
+    if (pane_0_bits != 0)
+        fatalError ("drawDEFormatMenu() %d %d 0x%x\n", pane_0_bits, N_PANE_0_CH, PANE_0_CH_MASK);
 
     // create a box for the menu
     SBox menu_b;
@@ -2122,7 +1765,7 @@ void drawDEFormatMenu()
 
     // run menu
     SBox ok_b;
-    MenuInfo menu = {menu_b, ok_b, false, false, 1, NARRAY(mitems), mitems};
+    MenuInfo menu = {menu_b, ok_b, UF_NOCLOCKS, M_CANCELOK, 1, NARRAY(mitems), mitems};
     if (runMenu (menu)) {
 
         // capture and save new state
@@ -2153,22 +1796,13 @@ void drawDEFormatMenu()
 
             // get new collection of plot choices
             uint32_t new_rotset = 0;
-            if (mitems[8].set)
-                new_rotset |= (1 << PLOT_CH_ADIF);
-            if (mitems[9].set)
-                new_rotset |= (1 << PLOT_CH_CONTESTS);
-            if (mitems[10].set)
-                new_rotset |= (1 << PLOT_CH_DXCLUSTER);
-            if (mitems[11].set)
-                new_rotset |= (1 << PLOT_CH_POTA);
-            if (mitems[12].set)
-                new_rotset |= (1 << PLOT_CH_SOTA);
+            for (int i = 0; i < N_PANE_0_CH; i++) { 
+                if (mitems[N_DEFMT_CORE+i].set)
+                    new_rotset |= (1<<menu_ch[i]);
+            }
 
-            // paranoid
-            if (new_rotset == 0)
-                fatalError ("drawDEFormatMenu: No rotset");
-
-            if (!enforceDXCAlone (plot_b[PANE_0], new_rotset)) {
+            // might not be any if user clicked this section but made no choice
+            if (new_rotset != 0) {
 
                 // ok!
                 plot_rotset[PANE_0] = new_rotset;
@@ -2223,19 +1857,6 @@ bool getDXPrefix (char p[MAX_PREF_LEN+1])
         return (ll2Prefix (dx_ll, p));
     }
 }
-
-#if 0           // see comments in newDX
-/* display the DX prefix at dx_c 
- */
-static void drawDXCursorPrefix()
-{
-    char p[MAX_PREF_LEN+1];
-    if (getDXPrefix(p)) {
-        setMapTagBox (p, dx_c.s, dx_c.r+2, prefix_b);
-        drawMapTag (p, prefix_b);
-    }
-}
-#endif
 
 /* this function positions a box to contain short text beneath a symbol at location s that has radius r,
  *   where s is assumed to be over map. the preferred position is centered below s, but it may be moved
@@ -2419,6 +2040,10 @@ void eraseScreen()
     tft.setPR (0, 0, 0, 0);
     tft.fillScreen(RA8875_BLACK);
     tft.drawPR();
+
+    // we assume erasing is prep for some other page
+    hideClocks();
+    mainpage_up = false;
 }
 
 /* holdover from ESP days
@@ -2527,31 +2152,41 @@ static bool postDiags (void)
     return (ok);
 }
 
-/* attempt to open the given web page in a new browser tab.
- *   on macos: run open
- *   on ubuntu or RPi: sudo apt install xdg-utils
- *   on redhat: sudo yum install xdg-utils
- */
-void openURL (const char *url)
-{
-#if !defined(_WEB_ONLY)
-    StackMalloc cmd_mem(strlen(url) + 50);
-    char *cmd = (char *) cmd_mem.getMem();
-    #if defined (__APPLE__)
-        snprintf (cmd, cmd_mem.getSize(), "open %s", url);
-    #else
-        snprintf (cmd, cmd_mem.getSize(), "xdg-open %s", url);
-    #endif
-    if ((system (cmd) >> 8) != 0)
-        Serial.printf ("URL: fail: %s\n", cmd);
-    else
-        Serial.printf ("URL: ok: %s\n", cmd);
-#endif // !_WEB_ONLY
 
-    // try telling our own page -- liveweb will free() once it has been sent
-    if (!liveweb_openurl)
-        liveweb_openurl = strdup (url);
+/* fork then run execv(3) command without a shell to retain our rootiness.
+ * return exit status from waitpid().
+ * N.B. caller must end list with a NULL
+ * N.B. tempting to just assume the args are already a list on the stack but we'd rather not.
+ */
+static int runExecv (const char *path, ...)
+{
+        int pid = fork();
+
+        if (pid == 0) {
+            // child
+            char **argv = NULL;
+            int n_argv = 0;
+            va_list ap;
+            va_start (ap, path);
+            for(;;) {
+                char *arg = va_arg (ap, char *);
+                argv = (char **) realloc (argv, (n_argv+1) * sizeof(char *));
+                argv[n_argv++] = arg;
+                if (arg == NULL)
+                    break;
+            }
+            va_end (ap);
+            execv (path, (char **const) argv);
+            Serial.printf ("execv(%s): %s\n", path, strerror(errno));
+            free ((void*)argv);
+            _exit(1);
+        }
+
+        int status;
+        waitpid (pid, &status, 0);
+        return (status);
 }
+
 
 /* ask Are You Sure for the given question.
  * return whether yes
@@ -2573,7 +2208,7 @@ static bool RUSure (SBox &box, const char *q)
 
     SBox ok_b;
 
-    MenuInfo menu = {box, ok_b, false, false, 1, n_rusm, mitems};
+    MenuInfo menu = {box, ok_b, UF_NOCLOCKS, M_CANCELOK, 1, n_rusm, mitems};
     return (runMenu (menu));
 }
 
@@ -2581,7 +2216,6 @@ static bool RUSure (SBox &box, const char *q)
  */
 static void runShutdownMenu(void)
 {
-    closeDXCluster();       // prevent inbound msgs from clogging network
     closeGimbal();          // avoid dangling connection
 
     // if screen is locked, the only menu option is to unlock
@@ -2607,7 +2241,7 @@ static void runShutdownMenu(void)
 
     // run menu
     bool do_full_init = false;
-    MenuInfo menu = {menu_b, ok_b, false, false, 1, n_shm, mitems};
+    MenuInfo menu = {menu_b, ok_b, UF_NOCLOCKS, M_CANCELOK, 1, n_shm, mitems};
     if (runMenu(menu)) {
 
         // engage each selection
@@ -2652,15 +2286,15 @@ static void runShutdownMenu(void)
                 tft.setCursor (350, 200);
                 tft.print ("Rebooting...");
                 wdDelay (1000);
-                int x = system ("/sbin/reboot || /usr/sbin/reboot");
+                int x = runExecv ("/sbin/reboot", "reboot", NULL);
                 if (WIFEXITED(x) && WEXITSTATUS(x) == 0)
                     doExit();
                 else {
+                    Serial.printf ("reboot exited %d\n", x);
                     eraseScreen();
                     tft.setCursor (350, 200);
                     tft.print ("Reboot failed");
                     wdDelay (1000);
-                    Serial.printf ("system(reboot) returns %d\n", x);
                     do_full_init = true;
                 }
             }
@@ -2674,16 +2308,23 @@ static void runShutdownMenu(void)
                 tft.setCursor (350, 200);
                 tft.print ("Shutting down...");
                 wdDelay (1000);
-                int x = system ("/sbin/poweroff || /usr/sbin/poweroff || /sbin/halt || /usr/sbin/halt");
+                int x = runExecv ("/sbin/poweroff", "poweroff", NULL);
                 if (WIFEXITED(x) && WEXITSTATUS(x) == 0)
                     doExit();
                 else {
-                    eraseScreen();
-                    tft.setCursor (350, 200);
-                    tft.print ("Shutdown failed");
-                    wdDelay (1000);
-                    Serial.printf ("system(poweroff) returns %d\n", x);
-                    do_full_init = true;
+                    // well then try halt
+                    Serial.printf ("poweroff exited %d, trying halt\n", x);
+                    x = runExecv ("/sbin/halt", "halt", NULL);
+                    if (WIFEXITED(x) && WEXITSTATUS(x) == 0)
+                        doExit();
+                    else {
+                        Serial.printf ("halt exited %d\n", x);
+                        eraseScreen();
+                        tft.setCursor (350, 200);
+                        tft.print ("Shutdown failed");
+                        wdDelay (1000);
+                        do_full_init = true;
+                    }
                 }
             }
         }
@@ -2730,6 +2371,9 @@ void doExit()
  */
 void fatalError (const char *fmt, ...)
 {
+    // this might be called from other than the main thread
+    stop_main_thread = true;
+
     // format message, accommodate really long strings
     const int mem_inc = 500;
     int mem_len = 0;
@@ -2756,8 +2400,9 @@ void fatalError (const char *fmt, ...)
             break;
     }
 
-    // log for sure
+    // log and post diags for sure
     Serial.printf ("Fatal: %s\n", msg);
+    postDiags();
 
     // it may still be very early so wait a short while for display
     for (int i = 0; i < 20; i++) {
@@ -2806,54 +2451,54 @@ void fatalError (const char *fmt, ...)
         SBox x_b = {450, 400, 100, 50};
         const char r_msg[] = "Restart";
         const char x_msg[] = "Exit";
-        drawStringInBox (r_msg, r_b, false, RA8875_WHITE);
-        drawStringInBox (x_msg, x_b, false, RA8875_WHITE);
-        int kb_sel = -1;    // 0 if kb chose Restart, 1 if Exit
-        drainTouch();
+        bool select_restart = true;
 
         SCoord s;
         char kbc;
         UserInput ui = {
             screen_b,
-            NULL,
-            false,
-            0,
-            false,
+            UI_UFuncNone,
+            UF_UNUSED,
+            UI_NOTIMEOUT,
+            UF_NOCLOCKS,
             s,
             kbc,
             false,
             false
         };
 
+        drainTouch();
+
+        // must select restart or exit by some means
         for(;;) {
 
-            tft.drawRect (r_b.x+3, r_b.y+3, r_b.w-6, r_b.h-6, kb_sel == 0 ? RA8875_GREEN : RA8875_BLACK);
-            tft.drawRect (x_b.x+3, x_b.y+3, x_b.w-6, x_b.h-6, kb_sel == 1 ? RA8875_GREEN : RA8875_BLACK);
+            // show current selection
+            drawStringInBox (r_msg, r_b, select_restart, RA8875_WHITE);
+            drawStringInBox (x_msg, x_b, !select_restart, RA8875_WHITE);
 
+            // wait for any user action
             (void) waitForUser(ui);
 
-            bool kb_go = false;
-            if (kbc) {
-                if (kb_sel < 0)
-                    kb_sel = 0;
-                if (kbc == '\r' || kbc == '\n' || kbc == ' ')
-                    kb_go = true;
-                else if (kbc == 'h' && kb_sel == 1)
-                    kb_sel = 0;
-                else if (kbc == 'l' && kb_sel == 0)
-                    kb_sel = 1;
-            }
+            if (kbc == CHAR_LEFT || kbc == CHAR_RIGHT) {
 
-            if ((kb_go && kb_sel == 0) || inBox (s, r_b)) {
-                drawStringInBox (r_msg, r_b, true, RA8875_WHITE);
-                Serial.print ("Fatal error: rebooting\n");
-                doReboot();
-            }
+                // L/R arrow keys appear to move to opposite selection
+                select_restart = !select_restart;
 
-            if ((kb_go && kb_sel == 1) || inBox (s, x_b)) {
-                drawStringInBox (x_msg, x_b, true, RA8875_WHITE);
-                Serial.print ("Fatal error: exiting\n");
-                doExit();
+            } else {
+
+                bool typed_ok = kbc == CHAR_CR || kbc == CHAR_NL;
+
+                if ((typed_ok && select_restart) || (kbc == CHAR_NONE && inBox(s, r_b))) {
+                    drawStringInBox (r_msg, r_b, true, RA8875_WHITE);
+                    Serial.print ("Fatal error: rebooting\n");
+                    doReboot();
+                }
+
+                if ((typed_ok && !select_restart) || (kbc == CHAR_NONE && inBox(s, x_b))) {
+                    drawStringInBox (x_msg, x_b, true, RA8875_WHITE);
+                    Serial.print ("Fatal error: exiting\n");
+                    doExit();
+                }
             }
         }
     }

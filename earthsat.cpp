@@ -11,22 +11,11 @@
 bool dx_info_for_sat;                   // global to indicate whether dx_info_b is for DX info or sat info
 
 // path drawing
-// N.B. MAX_PATH must be a power of 2 for dashed lines
-#if defined(_IS_ESP8266)
-    // this requires dense collection of individual dots that are plotted as the map is drawn
-    #define MAX_PATH    2048            // max number of points in orbit path
-    #define FOOT_ALT0   1000            // n dots for 0 deg altitude locus
-    #define FOOT_ALT30  300             // n dots for 30 deg altitude locus
-    #define FOOT_ALT60  100             // n dots for 60 deg altitude locus
-#else
-    // can be sparser because we just draw lines
-    #define MAX_PATH    512
-    #define FOOT_ALT0   200
-    #define FOOT_ALT30  100
-    #define FOOT_ALT60  75
-#define SHSATDTMAP      1               // whether to show satellite time on map
-#endif
-#define N_FOOT      3                   // number of footprint altitude loci
+#define MAX_PATH        512             // N.B. MAX_PATH must be a power of 2 for dashed lines to work right
+#define FOOT_ALT0       200
+#define FOOT_ALT30      100
+#define FOOT_ALT60      75
+#define N_FOOT          3               // number of footprint altitude loci
 
 
 // config
@@ -41,6 +30,7 @@ bool dx_info_for_sat;                   // global to indicate whether dx_info_b 
 #define FONT_H          (dx_info_b.h/6) // height for SMALL_FONT
 #define FONT_D          5               // font descent
 #define SAT_COLOR       RA8875_RED      // overall annotation color
+#define BTN_COLOR       RA8875_GREEN    // button fill color
 #define SATUP_COLOR     RGB565(0,200,0) // time color when sat is up
 #define SOON_COLOR      RGB565(200,0,0) // table text color for pass soon
 #define SOON_MINS       10              // "soon", minutes
@@ -70,7 +60,7 @@ typedef enum {
 } PassState;
 
 // state
-static const char sat_get_all[] PROGMEM = "/esats.pl?getall=";                  // command to get all TLE
+static const char sat_get_all[] = "/esats.pl?getall=";                  // command to get all TLE
 static const char sat_one_page[] = "/esats.pl?tlename=%s";                      // command to get one TLE
 static Satellite *sat;                  // satellite definition, if any
 static Observer *obs;                   // DE
@@ -167,7 +157,6 @@ static void unsetSat()
  */
 static void updateFootPrint (float satlat, float satlng)
 {
-    resetWatchdog();
 
     // complement of satlat
     float cosc = sinf(satlat);
@@ -261,7 +250,6 @@ static void findNextPass(const char *name, time_t t, SatRiseSet &rs)
     rs.set_ok = rs.rise_ok = false;
     rs.ever_up = rs.ever_down = false;
     while ((!rs.set_ok || !rs.rise_ok) && t_srch < t_now + 2.0F) {
-        resetWatchdog();
 
         // find circumstances at time t_srch
         sat->predict (t_srch);
@@ -340,7 +328,6 @@ static void findNextPass(const char *name, time_t t, SatRiseSet &rs)
  */
 static void drawSatSkyDome()
 {
-    resetWatchdog();
 
     // size and center of screen path
     uint16_t r0 = satpass_c.r;
@@ -421,7 +408,6 @@ static void drawSatSkyDome()
     uint16_t max_el_x = 0, max_el_y = 0;
     uint16_t prev_x = 0, prev_y = 0;
     for (uint8_t i = 0; i < n_steps; i++) {
-        resetWatchdog();
 
         // find topocentric position @ t
         float el, az, range, rate;
@@ -507,7 +493,6 @@ static void drawSatName()
     if (!sat || !obs || !SAT_NAME_IS_SET() || !dx_info_for_sat || SHOWING_PANE_0())
         return;
 
-    resetWatchdog();
 
     // retrieve saved name without '_'
     char user_name[NV_SATNAME_LEN];
@@ -535,11 +520,7 @@ static void setSatMapNameLoc()
     // set size based on longest of sat name or rise/set time
     selectFontStyle (LIGHT_FONT, SMALL_FONT);
     map_name_b.w = fmaxf (MAP_DT_W, getTextWidth(user_name));
-#if defined(SHSATDTMAP)
     map_name_b.h = FONT_H + 10;
-#else
-    map_name_b.h = FONT_H + 1;          // reduce flashing by not including height for time not shown anyway
-#endif
 
     switch ((MapProjection)map_proj) {
 
@@ -591,7 +572,6 @@ static void setSatMapNameLoc()
  */
 static void drawSatPassMarker()
 {
-    resetWatchdog();
 
     SatNow satnow;
     getSatNow (satnow);
@@ -617,7 +597,6 @@ static void drawSatTime (bool force, const char *label, uint16_t color, float dt
     if (!sat)
         return;
 
-    resetWatchdog();
 
     // previous state
     static char prev_label[3];                  // use just first few chars
@@ -741,23 +720,23 @@ static void fatalSatError (const char *fmt, ...)
     ok_b.h = 35;
     drawStringInBox (button_msg, ok_b, false, RA8875_WHITE);
 
-    // wait forever for user to tap
+    // wait forever for user to do anything
     SCoord s;
     char c;
     UserInput ui = {
-        ok_b,                                   // ok box bounds
-        NULL,                                   // user check function, else NULL
-        false,                                  // true if fp returned true
-        0,                                      // timeout, msec, or 0 forever
-        false,                                  // whether to update clocks while waiting
-        s,                                      // tap location or ...
-        c,                                      // keyboard char code
-        false, false,
+        ok_b,
+        UI_UFuncNone,
+        UF_UNUSED,
+        UI_NOTIMEOUT,
+        UF_NOCLOCKS,
+        s,
+        c,
+        false,
+        false,
     };
     (void) waitForUser (ui);
 
     // restart without sat
-    resetWatchdog();
     unsetSat();
     initScreen();
 }
@@ -820,7 +799,6 @@ static bool satLookup ()
 
     for (int try_i = 0; !ok && try_i < MAX_TRIES; try_i++) {
 
-        resetWatchdog();
 
         // wait a bit before retrying
         if (try_i > 0)
@@ -894,7 +872,7 @@ static bool satLookup ()
 
 static void showSelectionBox (const SCoord &c, bool on)
 {
-    uint16_t fill_color = on ? SAT_COLOR : RA8875_BLACK;
+    uint16_t fill_color = on ? BTN_COLOR : RA8875_BLACK;
     tft.fillRect (c.x, c.y+(CELL_H-CB_SIZE)/2+3, CB_SIZE, CB_SIZE, fill_color);
     tft.drawRect (c.x, c.y+(CELL_H-CB_SIZE)/2+3, CB_SIZE, CB_SIZE, RA8875_WHITE);
 }
@@ -907,7 +885,6 @@ static bool askSat()
 {
     #define NO_SAT              (-1)            // cookie when op has chosen not to display a sat
 
-    resetWatchdog();
 
     // entire display is one big menu box
     SBox screen_b;
@@ -921,13 +898,14 @@ static bool askSat()
     char typed_c;
     UserInput ui = {
         screen_b,
-        NULL,
-        false,
+        UI_UFuncNone,
+        UF_UNUSED,
         MENU_TO,
-        false,
+        UF_NOCLOCKS,
         tap_s,
         typed_c,
-        false, false,
+        false,
+        false,
     };
 
     // init selected item to none, might be set while drawing the matrix
@@ -979,13 +957,11 @@ static bool askSat()
 
     // open connection
     WiFiClient sat_client;
-    resetWatchdog();
     if (!wifiOk() || !sat_client.connect (backend_host, backend_port))
         goto out;
 
     // query page and skip header
-    resetWatchdog();
-    httpHCPGET (sat_client, backend_host, sat_get_all);
+    httpHCGET (sat_client, backend_host, sat_get_all);
     if (!httpSkipHeader (sat_client))
         goto out;
 
@@ -1088,8 +1064,8 @@ static bool askSat()
     selectFontStyle (BOLD_FONT, SMALL_FONT);
     while (waitForUser (ui)) {
 
-        // tap Ok button or type Enter or ESC?
-        if (typed_c == '\r' || typed_c == '\n' || typed_c == 27 || inBox (tap_s, ok_b)) {
+        // tap Ok button or type Enter or ESC
+        if (typed_c == CHAR_CR || typed_c == CHAR_NL || typed_c == CHAR_ESC || inBox (tap_s, ok_b)) {
             // show Ok button highlighted
             drawStringInBox ("Ok", ok_b, true, RA8875_WHITE);
             goto out;
@@ -1413,8 +1389,7 @@ void updateSatPass()
         return;
 
     // do minimal display update if showing
-    if (dx_info_for_sat && getSWDisplayState() == SWD_NONE) {
-        resetWatchdog();
+    if (dx_info_for_sat && mainpage_up) {
         if (fresh_update) 
             drawSatPass();              // full display update
         else
@@ -1435,7 +1410,6 @@ void updateSatPath()
     if (!sat || !obs || !SAT_NAME_IS_SET())
         return;
 
-    resetWatchdog();
 
     // from here we have a valid sat to report
 
@@ -1458,8 +1432,8 @@ void updateSatPath()
     if (!sat_path)
         fatalError (_FX("No memory for satellite path"));
 
-    // decide line width
-    int lw = getPathWidth();
+    // decide line width, if used
+    int lw = getRawPathWidth(SATPATH_CSPR);
 
     // fill sat_path
     float period = sat->period();
@@ -1469,7 +1443,7 @@ void updateSatPath()
     for (uint16_t p = 0; p < max_path; p++) {
 
         // place dashed line points off screen courtesy overMap()
-        if (getColorDashed(SATPATH_CSPR) && (dashed++ & (MAX_PATH>>7))) {   // first always on for center dot
+        if (getPathDashed(SATPATH_CSPR) && (dashed++ & (MAX_PATH>>7))) {   // first always on for center dot
             sat_path[n_path] = {10000, 10000};
         } else {
             // compute next point along path
@@ -1483,10 +1457,6 @@ void updateSatPath()
         t += period/max_path;   // show 1 rev
         sat->predict (t);
         sat->geo (satlat, satlng);
-
-        // loop takes over a second on ESP so update clock midway
-        if (p == max_path/2)
-            updateClocks(false);
     }
 
     updateClocks(false);
@@ -1507,79 +1477,35 @@ void drawSatPathAndFoot()
     if (!sat)
         return;
 
-    resetWatchdog();
-
-    // decide line width
-    int lw = getPathWidth();
-
-    // draw path
-    uint16_t path_color = getMapColor(SATPATH_CSPR);
-    for (int i = 1; i < n_path; i++) {
-        SCoord &sp0 = sat_path[i-1];
-        SCoord &sp1 = sat_path[i];
-        if (segmentSpanOkRaw(sp0, sp1, 2*lw)) {
-            if (i == 1) {
-                // first coord is always the current location, show only if visible
-                // N.B. set ll2s edge to accommodate this dot
-                tft.fillCircleRaw (sp0.x, sp0.y, 2*lw, path_color);
-                tft.drawCircleRaw (sp0.x, sp0.y, 2*lw, RA8875_BLACK);
+    // draw path, if on
+    int pw = getRawPathWidth(SATPATH_CSPR);
+    if (pw) {
+        uint16_t pc = getMapColor(SATPATH_CSPR);
+        for (int i = 1; i < n_path; i++) {
+            SCoord &sp0 = sat_path[i-1];
+            SCoord &sp1 = sat_path[i];
+            if (segmentSpanOkRaw(sp0, sp1, 2*pw)) {
+                if (i == 1) {
+                    // first coord is always the current location, show only if visible
+                    // N.B. set ll2s edge to accommodate this dot
+                    tft.fillCircleRaw (sp0.x, sp0.y, 2*pw, pc);
+                    tft.drawCircleRaw (sp0.x, sp0.y, 2*pw, RA8875_BLACK);
+                }
+                tft.drawLineRaw (sp0.x, sp0.y, sp1.x, sp1.y, pw, pc);
             }
-            tft.drawLineRaw (sp0.x, sp0.y, sp1.x, sp1.y, lw, path_color);
         }
     }
 
     // draw foots
-    uint16_t foot_color = getMapColor(SATFOOT_CSPR);
-    for (int alt_i = 0; alt_i < N_FOOT; alt_i++) {
-        for (uint16_t foot_i = 0; foot_i < n_foot[alt_i]; foot_i++) {
-            SCoord &sf0 = sat_foot[alt_i][foot_i];
-            SCoord &sf1 = sat_foot[alt_i][(foot_i+1)%n_foot[alt_i]];   // closure!
-            if (segmentSpanOkRaw(sf0,sf1,1))
-                tft.drawLineRaw (sf0.x, sf0.y, sf1.x, sf1.y, lw, foot_color);
-        }
-    }
-}
-
-/* draw all sat path points on the given screen row.
- * N.B. only used with _IS_ESP8266
- */
-void drawSatPointsOnRow (uint16_t y0)
-{
-    if (!sat)
-        return;
-
-    resetWatchdog();
-
-    // draw fat pixel above so we don't clobber it on next row down
-
-    // path
-    uint16_t path_color = getMapColor(SATPATH_CSPR);
-    for (uint16_t p = 0; p < n_path; p++) {
-        SCoord s = sat_path[p];
-        if (y0 == s.y && overMap(s)) {
-            tft.drawPixel (s.x, s.y, path_color);
-            s.y -= 1;
-            if (overMap(s)) tft.drawPixel (s.x, s.y, path_color);
-            s.x += 1;
-            if (overMap(s)) tft.drawPixel (s.x, s.y, path_color);
-            s.y += 1;
-            if (overMap(s)) tft.drawPixel (s.x, s.y, path_color);
-        }
-    }
-
-    // 3 footprint segments
-    uint16_t foot_color = getMapColor(SATFOOT_CSPR);
-    for (uint8_t alt_i = 0; alt_i < N_FOOT; alt_i++) {
-        for (uint16_t foot_i = 0; foot_i < n_foot[alt_i]; foot_i++) {
-            SCoord s = sat_foot[alt_i][foot_i];
-            if (y0 == s.y && overMap(s)) {
-                tft.drawPixel (s.x, s.y, foot_color);
-                s.y -= 1;
-                if (overMap(s)) tft.drawPixel (s.x, s.y, foot_color);
-                s.x += 1;
-                if (overMap(s)) tft.drawPixel (s.x, s.y, foot_color);
-                s.y += 1;
-                if (overMap(s)) tft.drawPixel (s.x, s.y, foot_color);
+    int fw = getRawPathWidth(SATFOOT_CSPR);
+    if (fw) {
+        uint16_t fc = getMapColor(SATFOOT_CSPR);
+        for (int alt_i = 0; alt_i < N_FOOT; alt_i++) {
+            for (uint16_t foot_i = 0; foot_i < n_foot[alt_i]; foot_i++) {
+                SCoord &sf0 = sat_foot[alt_i][foot_i];
+                SCoord &sf1 = sat_foot[alt_i][(foot_i+1)%n_foot[alt_i]];   // closure!
+                if (segmentSpanOkRaw (sf0, sf1, 1))
+                    tft.drawLineRaw (sf0.x, sf0.y, sf1.x, sf1.y, fw, fc);
             }
         }
     }
@@ -1596,7 +1522,6 @@ void drawSatNameOnRow(uint16_t y0)
     if (y0 != 0 && (y0 < map_name_b.y || y0 >= map_name_b.y + map_name_b.h))
         return;
 
-    resetWatchdog();
 
     // retrieve saved name without '_'
     char user_name[NV_SATNAME_LEN];
@@ -1609,7 +1534,6 @@ void drawSatNameOnRow(uint16_t y0)
     shadowString (user_name, true, getMapColor(SATFOOT_CSPR), un_x, un_y);
 
     // draw time to next event, if any, unless ESP which never erases
-#if defined(SHSATDTMAP)
     float days;
     PassState ps = findPassState(&days);
     switch (ps) {
@@ -1640,7 +1564,6 @@ void drawSatNameOnRow(uint16_t y0)
         }
         break;
     }
-#endif // SHSATDTMAP
 }
 
 /* return whether user has tapped near the head of the satellite path or in the map name
@@ -1698,10 +1621,8 @@ void drawSatPass()
  */
 bool querySatSelection()
 {
-    resetWatchdog();
 
     // we need the whole screen
-    closeDXCluster();       // prevent inbound msgs from clogging network
     closeGimbal();          // avoid dangling connection
     hideClocks();
 
@@ -1842,13 +1763,11 @@ const char **getAllSatNames()
 
     // open connection
     WiFiClient sat_client;
-    resetWatchdog();
     if (!wifiOk() || !sat_client.connect (backend_host, backend_port))
         return (NULL);
 
     // query page and skip header
-    resetWatchdog();
-    httpHCPGET (sat_client, backend_host, sat_get_all);
+    httpHCGET (sat_client, backend_host, sat_get_all);
     if (!httpSkipHeader (sat_client)) {
         sat_client.stop();
         return (NULL);
@@ -1958,7 +1877,6 @@ static void showNextSatEvents ()
     // clean
     hideClocks();
     eraseScreen();
-    resetWatchdog();
 
     // setup layout
     #define _SNS_LR_B     10                    // left-right border
@@ -2006,7 +1924,6 @@ static void showNextSatEvents ()
     tft.fillRect (x, y-24, 250, 100, RA8875_BLACK);     // font y - font height
 
     // show list, if any
-    resetWatchdog();
     selectFontStyle (LIGHT_FONT, SMALL_FONT);
     tft.setTextColor (RA8875_WHITE);
     if (n_times == 0) {
@@ -2020,14 +1937,13 @@ static void showNextSatEvents ()
         // draw table
         for (int i = 0; i < n_times; i++) {
 
-            resetWatchdog();
 
             // font is variable width so we must space each column separately
             char buf[30];
 
             // convert to DE local time
-            time_t rt = rises[i] + de_tz.tz_secs;
-            time_t st = sets[i] + de_tz.tz_secs;
+            time_t rt = rises[i] + getTZ (de_tz);
+            time_t st = sets[i] + getTZ (de_tz);
             int up = st - rt;       // nextSatRSEvents assures us this will be > 0
 
             // detect crossing midnight by comparing weekday
@@ -2088,21 +2004,24 @@ static void showNextSatEvents ()
         free ((void*)sazs);
     }
 
-    // wait for any input
-    SCoord s_tap;
-    char typed_char;
+    // wait for user to ack
+    SCoord tap_s;
+    char type_c;
     UserInput ui = {
         ok_b,
-        NULL,
-        false,
+        UI_UFuncNone,
+        UF_UNUSED,
         _SNS_TIMEOUT,
-        false,
-        s_tap,
-        typed_char,
+        UF_NOCLOCKS,
+        tap_s,
+        type_c,
         false,
         false
     };
-    waitForUser (ui);
+
+    do {
+        waitForUser (ui);
+    } while (! (type_c == CHAR_CR || type_c == CHAR_NL || type_c == CHAR_ESC || inBox (tap_s, ok_b)) );
 
     // ack
     drawStringInBox (button_name, ok_b, true, RA8875_GREEN);
@@ -2133,7 +2052,7 @@ void drawDXSatMenu (const SCoord &s)
 
     // run menu
     SBox ok_b;
-    MenuInfo menu = {menu_b, ok_b, false, false, 1, _DXS_N, mitems};
+    MenuInfo menu = {menu_b, ok_b, UF_NOCLOCKS, M_CANCELOK, 1, _DXS_N, mitems};
     if (runMenu (menu)) {
         if (mitems[_DXS_SHOWDX].set) {
             // return to normal DX info but leave sat functional

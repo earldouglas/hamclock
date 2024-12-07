@@ -3,14 +3,17 @@
 
 #include "HamClock.h"
 
-#define WN_MIN_DB   (-80)               // minimum graphed dBm
-#define WN_MAX_DB   (-20)               // max graphed dBm
-#define WN_TRIS     10                  // current rssi triangle marker half-size
-#define WN_MMTRIS   5                   // min/max rssi triangle marker half-size
-#define MM_COLOR    RA8875_WHITE        // min/max triangle color
+#define WN_MIN_DB   (-80)                       // minimum graphed dBm
+#define WN_MAX_DB   (-20)                       // max graphed dBm
+#define WN_TRIS     10                          // current rssi triangle marker half-size
+#define WN_MMTRIS   5                           // min/max rssi triangle marker half-size
+#define MM_COLOR    RA8875_WHITE                // min/max triangle color
+#define BUTTON_W    120                         // button width
+#define BUTTON_H    35                          // button height
+#define BUTTON_M    40                          // button l-r margin
 
 // handy conversion of RSSI to graphics x
-#define RSSI_X(R)   ((uint16_t)(rssi_b.x + rssi_b.w*((R) - WN_MIN_DB)/(WN_MAX_DB-WN_MIN_DB)))
+#define RSSI_X(R)   ((uint16_t)(rssi_b.x + rssi_b.w*(CLAMPF((R),WN_MIN_DB,WN_MAX_DB) - WN_MIN_DB)/(WN_MAX_DB-WN_MIN_DB)))
 
 // state
 static bool wifi_meter_up;              // whether visible now
@@ -83,15 +86,13 @@ bool readWiFiRSSI(int &rssi)
 
 /* run the wifi meter screen until op taps Dismiss or Ignore.
  * show ignore based on incoming ignore_on and update if user changes.
- * return last known rssi.
  */
-int runWiFiMeter(bool warn, bool &ignore_on)
+void runWiFiMeter(bool warn, bool &ignore_on)
 {
     // prep
-    Serial.printf ("WiFiM @ %u start Ignore %s\n", millis()/1000U, ignore_on ? "on" : "off");
+    Serial.printf ("WiFiM: start with ignore %s\n", ignore_on ? "on" : "off");
     wifi_meter_up = true;
     eraseScreen();
-    closeDXCluster();
     closeGimbal();
 
     selectFontStyle (LIGHT_FONT, SMALL_FONT);
@@ -127,33 +128,36 @@ int runWiFiMeter(bool warn, bool &ignore_on)
 
     y += 60;
 
-    // dismiss button
-    SBox dismiss_b;
-    dismiss_b.x = 40;
-    dismiss_b.y = y;
-    dismiss_b.w = 100;
-    dismiss_b.h = 35;
-    drawStringInBox ("Resume", dismiss_b, false, RA8875_GREEN);
+    // resume button
+    static const char resume_lbl[] = "Resume";
+    SBox resume_b;
+    resume_b.x = BUTTON_M;
+    resume_b.y = y;
+    resume_b.w = BUTTON_W;
+    resume_b.h = BUTTON_H;
+    drawStringInBox (resume_lbl, resume_b, false, RA8875_GREEN);
 
     // ignore button
+    static const char ignore_lbl[] = "Ignore";
     SBox ignore_b;
-    ignore_b.x = tft.width() - 150;
+    ignore_b.x = tft.width() - (BUTTON_W+BUTTON_M);
     ignore_b.y = y;
-    ignore_b.w = 100;
-    ignore_b.h = 35;
-    drawStringInBox ("Ignore", ignore_b, ignore_on, RA8875_GREEN);
+    ignore_b.w = BUTTON_W;
+    ignore_b.h = BUTTON_H;
+    drawStringInBox (ignore_lbl, ignore_b, ignore_on, RA8875_GREEN);
 
     // reset limits button
+    static const char reset_lbl[] = "Reset Hi-Lo";
     SBox reset_b;
-    reset_b.x = tft.width() - 150;
+    reset_b.x = ignore_b.x;
     reset_b.y = y + ignore_b.h + 10;
-    reset_b.w = 100;
-    reset_b.h = 35;
-    drawStringInBox ("Reset", reset_b, ignore_on, RA8875_GREEN);
+    reset_b.w = BUTTON_W;
+    reset_b.h = BUTTON_H;
+    drawStringInBox (reset_lbl, reset_b, false, RA8875_GREEN);
 
     // signal strength scale
     SBox rssi_b;
-    rssi_b.x = dismiss_b.x + dismiss_b.w + 50;
+    rssi_b.x = resume_b.x + resume_b.w + 50;
     rssi_b.y = y;
     rssi_b.w = ignore_b.x - rssi_b.x - 50;
     rssi_b.h = 17;
@@ -197,6 +201,7 @@ int runWiFiMeter(bool warn, bool &ignore_on)
         // erase real-time marker and value
         drawCMarker (rssi_b.y+rssi_b.h, prev_rssi_x, RA8875_BLACK);
         tft.fillRect (rssi_b.x + rssi_b.w/2 - 20, rssi_b.y + rssi_b.h + 2*WN_TRIS + 1, 40, 30, RA8875_BLACK);
+
         // read and update
         if (readWiFiRSSI(rssi)) {
 
@@ -213,7 +218,6 @@ int runWiFiMeter(bool warn, bool &ignore_on)
             }
 
             // show current
-            rssi = CLAMPF (rssi, WN_MIN_DB, WN_MAX_DB);
             uint16_t rssi_x = RSSI_X(rssi);
             drawCMarker (rssi_b.y+rssi_b.h, rssi_x, getWiFiMeterColor (rssi_b,rssi_x));
             tft.setCursor (rssi_b.x + rssi_b.w/2 - 20, rssi_b.y + rssi_b.h + 2*WN_TRIS + 25);
@@ -222,33 +226,38 @@ int runWiFiMeter(bool warn, bool &ignore_on)
             prev_rssi_x = rssi_x;
 
             // log occassionally
-            if (timesUp (&log_t, 1000))
-                Serial.printf ("WiFiM @ %u %d\n", log_t/1000U, rssi);
+            if (timesUp (&log_t, 5000))
+                Serial.printf ("WiFiM: %d .. %d .. %d\n", rssi_min, rssi, rssi_max);
         }
+
+        // update BME and brightness
+        readBME280();
+        followBrightness();
 
         // check touch
         SCoord tap;
         TouchType tt = readCalTouchWS (tap);
         if (tt != TT_NONE) {
 
-            // update BME and brightness, that's all if tap restores full brightness
-            readBME280();
-            followBrightness();
+            // bale if tap restores full brightness
             if (brightnessOn())
                 continue;
 
             // check controls
-            if (inBox (tap, dismiss_b)) {
-                Serial.printf ("WiFiM @ %u Resume\n", millis()/1000U);
+            if (inBox (tap, resume_b)) {
+                Serial.printf ("WiFiM: Resume\n");
+                drawStringInBox (resume_lbl, resume_b, true, RA8875_GREEN);
+                wdDelay (300);
                 done = true;
             } else if (inBox (tap, ignore_b)) {
                 ignore_on = !ignore_on;
-                drawStringInBox ("Ignore", ignore_b, ignore_on, RA8875_GREEN);
-                if (ignore_on) {
-                    Serial.printf ("WiFiM @ %u Ignore\n", millis()/1000U);
-                    done = true;
-                }
+                drawStringInBox (ignore_lbl, ignore_b, ignore_on, RA8875_GREEN);
+                Serial.printf ("WiFiM: Ignore %s\n", ignore_on ? "on" : "off");
             } else if (inBox (tap, reset_b)) {
+                Serial.printf ("WiFiM: Reset\n");
+                drawStringInBox (reset_lbl, reset_b, true, RA8875_GREEN);
+                wdDelay (300);
+                drawStringInBox (reset_lbl, reset_b, false, RA8875_GREEN);
                 rssi_min = rssi_max = 0;
                 int rssi;
                 (void) readWiFiRSSI(rssi);
@@ -263,12 +272,4 @@ int runWiFiMeter(bool warn, bool &ignore_on)
     // new state
     wifi_meter_up = false;
     initScreen();
-
-    return (rssi);
-
-}
-
-bool wifiMeterIsUp()
-{
-    return (wifi_meter_up);
 }

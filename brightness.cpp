@@ -49,7 +49,7 @@ bool found_ltr;                                 // set if ltr329 discovered
 // NCDXF_b or "BRB" public state
 uint8_t brb_mode;                               // one of BRB_MODE
 uint16_t brb_rotset;                            // mask of current BRB_MODEs
-time_t brb_updateT;                             // time of next update
+time_t brb_next_update;                         // time of next update
 
 #define X(a,b)  b,                              // expands BRBMODES to name plus comma
 const char *brb_names[BRB_N] = {
@@ -72,7 +72,7 @@ const char *brb_names[BRB_N] = {
 #define SFONT_H         7                       // small font height
 #define MARKER_H        3                       // scaler marker height
 #define SCALE_W         5                       // scale width
-#define FOLLOW_DT       300                     // read phot this often, ms; should be > LTR3XX_MEASRATE_200
+#define PHOT_DT         300                     // read phot this often, ms; should be > LTR3XX_MEASRATE_200
 
 static int16_t bpwm;                            // current brightness PWM value 0 .. BPWM_MAX
 static uint16_t phot;                           // current photoresistor value 0 .. PHOT_MAX
@@ -149,7 +149,7 @@ static void setDisplayBrightness(bool log)
 
             if (!been_here || want_on != was_on) {
 
-                #if defined(__APPLE__)
+                #if defined(_IS_APPLE)
 
                     static const char apple_on[] = "caffeinate -u -t 1";
                     static const char apple_off[] = "pmset displaysleepnow";
@@ -266,39 +266,6 @@ static uint16_t readPhot()
         }
     }
 
-#if defined(_SUPPORT_PHOT)
-
-    else {
-
-        static bool tried_photocell;
-        static bool found_photocell;
-
-        // adc increases when darker, we want increase when brighter
-        uint16_t raw_phot = PHOT_MAX - analogRead (PHOT_PIN);
-
-        if (!tried_photocell) {
-
-            // init and spin up smoothing
-            new_phot = raw_phot;
-            for (int i = 0; i < 20; i++) {
-                new_phot = PHOT_BLEND*raw_phot + (1-PHOT_BLEND)*new_phot;
-                raw_phot = PHOT_MAX - analogRead (PHOT_PIN);
-            }
-            tried_photocell = true;
-
-            // consider found if value at neigher extreme
-            found_phot = found_photocell = new_phot > NO_TOL && new_phot < PHOT_MAX-NO_TOL;
-        }
-
-        if (found_photocell) {
-
-            // blend in another reading
-            new_phot = PHOT_BLEND*raw_phot + (1-PHOT_BLEND)*new_phot;
-        }
-    }
-
-#endif  // _SUPPORT_PHOT
-
     // Serial.printf (_FX("Phot %d\n"), new_phot);                                         // RBF
     return (new_phot);
 
@@ -325,7 +292,7 @@ static void getPhotControl (SBox &b)
  */
 static void drawPhotSymbol()
 {
-        if (getSWDisplayState() != SWD_NONE)
+        if (!mainpage_up)
             return;
 
         uint8_t n = 2;                                          // number of \/
@@ -398,7 +365,7 @@ static void drawPhotControl()
 {
         resetWatchdog();
 
-        if (getSWDisplayState() != SWD_NONE)
+        if (!mainpage_up)
             return;
 
         SBox b;
@@ -439,7 +406,7 @@ static void drawBrControl()
 {
         resetWatchdog();
 
-        if (getSWDisplayState() != SWD_NONE)
+        if (!mainpage_up)
             return;
 
         SBox b;
@@ -486,7 +453,7 @@ static void drawOnOffControls()
 {
         resetWatchdog();
 
-        if (brb_mode != BRB_SHOW_ONOFF || getSWDisplayState() != SWD_NONE)
+        if (brb_mode != BRB_SHOW_ONOFF || !mainpage_up)
             return;
 
         tft.fillRect (NCDXF_b.x+1, NCDXF_b.y+1, NCDXF_b.w-2, NCDXF_b.h-2, RA8875_BLACK);
@@ -716,7 +683,7 @@ static void checkOnOffTimers()
 
         // check for time to turn on or off.
         // get local time
-        time_t local = utc + de_tz.tz_secs;
+        time_t local = utc + getTZ (de_tz);
         int hr = hour (local);
         int mn = minute (local);
         uint16_t mins_now = hr*60 + mn;
@@ -756,7 +723,7 @@ static void engageDisplayBrightness(bool log)
 
         // Serial.printf (_FX("BR: engage mode %d\n"), brb_mode);
 
-        if (getSWDisplayState() == SWD_NONE && !wifiMeterIsUp()) {
+        if (mainpage_up) {
             if (brb_mode == BRB_SHOW_BR)
                 drawBrControl();
             else if (brb_mode == BRB_SHOW_PHOT) {
@@ -996,7 +963,7 @@ void followBrightness()
 
         // not too fast (eg, while not updating map after new DE)
         static uint32_t follow_ms;
-        if (!timesUp (&follow_ms, FOLLOW_DT))
+        if (!timesUp (&follow_ms, PHOT_DT))
             return;
 
         // always check on/off first
@@ -1182,12 +1149,13 @@ static void runNCDXFMenu (void)
         };
 
         // boxes
-        SBox menu_b = NCDXF_b;                      // copy, not ref!
+        SBox menu_b = NCDXF_b;                          // copy, not ref!
         menu_b.y += 10;
+        menu_b.w = 0;                                   // shrink wrap
         SBox ok_b;
 
         // run menu
-        MenuInfo menu = {menu_b, ok_b, true, true, 1, BRB_N, mitems};   // no room for cancel
+        MenuInfo menu = {menu_b, ok_b, UF_CLOCKSOK, M_NOCANCEL, 1, BRB_N, mitems};   // no room for cancel
         bool ok = runMenu(menu);
 
         // engage new option unless canceled
@@ -1221,7 +1189,7 @@ static void runNCDXFMenu (void)
         }
 
         // immediate redraw even if no change in order to erase menu
-        brb_updateT = 0;
+        brb_next_update = 0;
 
         // save
         NVWriteUInt16 (NV_BRB_ROTSET, brb_rotset);

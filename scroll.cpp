@@ -1,16 +1,19 @@
 /* handy class to manage the scroll controls used in several panes.
  *
  * assumes data array is sorted oldest first. displayed list can either show newest entry
- * on top or bottom row, depending on scrollTopToBottom(). If newest is shown at the bottom, then 
- * scrolling Up means show Older entries; if newest is shown on top, then Up means show Newer entries.
+ * on top or bottom row, depending on scrollTopToBottom():
+ *   if true (newest is shown on top) then scrolling Up means show Newer entries and Down means Older.
+ *   if false (newest is shown at the bottom) then scrolling Up means show Older entries and Down means Newer.
+ * The data array and its state variables are exactly the same either way, only the displayed rows are
+ * affected.
  *
  * state variables:
  *
- *  max_vis: maximum rows in the displayed list
- *  top_vis: index into the data array containing the newest entry to be displayed
- *  n_data:  the number of entries in the data array
+ *   max_vis: maximum rows in the displayed list
+ *   top_vis: index into the data array containing the newest entry to be displayed
+ *   n_data:  the number of entries in the data array
  *
- *  example: n_data 7, max_vis 3, scrolled to show newest data
+ * example: n_data 7, max_vis 3, scrolled to show newest data
  *
  *    if scrollTopToBottom() is true:
  *  
@@ -45,11 +48,17 @@
 #define SCRDW_DY        23                      // y offset from box top to center of down arrow
 #define SCR_W           6                       // scroll arrow width
 #define SCR_H           10                      // scroll arrow height
+#define NEWSYM_DX       6                       // "new spots" symbol dx from box left
+#define NEWSYM_H        9                       // "new spots" symbol height
+#define NEWSYM_DY       (PANETITLE_H-NEWSYM_H)  // "new spots" symbol top dy from box top
+#define NEWSYM_W        20                      // "new spots" symbol width
+
+
 
 
 /* draw or erase the up scroll control as needed.
  */
-void ScrollState::drawScrollUpControl (const SBox &box, uint16_t color) const
+void ScrollState::drawScrollUpControl (const SBox &box, uint16_t arrow_color, uint16_t number_color) const
 {
         bool draw = okToScrollUp();
 
@@ -67,18 +76,22 @@ void ScrollState::drawScrollUpControl (const SBox &box, uint16_t color) const
         // tft.drawRect (x2+1, y0+1, box.x + box.w - x2 - 2, SCR_H, RA8875_RED);
 
         if (draw) {
-            tft.setCursor (x2+3, y0+2);
+            tft.setCursor (x2+1, y0+2);
             selectFontStyle (LIGHT_FONT, FAST_FONT);
-            tft.setTextColor (color);
-            tft.print (nMoreAbove());
+            tft.setTextColor (number_color);
+            int nma = nMoreAbove();
+            if (nma < 1000)
+                tft.print (nma);
+            else
+                tft.print (">99");
         }
 
-        tft.fillTriangle (x0, y0, x1, y1, x2, y2, draw ? color : RA8875_BLACK);
+        tft.fillTriangle (x0, y0, x1, y1, x2, y2, draw ? arrow_color : RA8875_BLACK);
 }
 
 /* draw, else erase, the down scroll control and associated count n.
  */
-void ScrollState::drawScrollDownControl (const SBox &box, uint16_t color) const
+void ScrollState::drawScrollDownControl (const SBox &box, uint16_t arrow_color, uint16_t number_color) const
 {
         bool draw = okToScrollDown();
 
@@ -96,15 +109,53 @@ void ScrollState::drawScrollDownControl (const SBox &box, uint16_t color) const
         // tft.drawRect (x1+1, y0+1, box.x + box.w - x1 - 2, SCR_H, RA8875_RED);
 
         if (draw) {
-            tft.setCursor (x1+3, y0+2);
+            tft.setCursor (x1+1, y0+2);
             selectFontStyle (LIGHT_FONT, FAST_FONT);
-            tft.setTextColor (color);
-            tft.print (nMoreBeneath());
+            tft.setTextColor (number_color);
+            int nmb = nMoreBeneath();
+            if (nmb < 1000)
+                tft.print (nmb);
+            else
+                tft.print (">99");
         }
 
-        tft.fillTriangle (x0, y0, x1, y1, x2, y2, draw ? color : RA8875_BLACK);
+        tft.fillTriangle (x0, y0, x1, y1, x2, y2, draw ? arrow_color : RA8875_BLACK);
 }
 
+
+/* draw, else erase, the New Spots symbol in the given box.
+ * when drawing: active indicates whether it should be shown as having just been tapped.
+ * N.B. must have already called initNewSpotsSymbol()
+ */
+void ScrollState::drawNewSpotsSymbol (const SBox &box, bool draw, bool active) const
+{
+    if (draw) {
+        selectFontStyle (LIGHT_FONT, FAST_FONT);
+        drawStringInBox ("New", newsym_b, active, newsym_color);
+    } else {
+        fillSBox (newsym_b, RA8875_BLACK);
+    }
+}
+
+/* return whether tap at s is over the New Spot symbol within box b.
+ * N.B. must have already called initNewSpotsSymbol()
+ */
+bool ScrollState::checkNewSpotsTouch (const SCoord &s, const SBox &b) const
+{
+    return (inBox (s, b) && inBox (s, newsym_b));
+}
+
+/* prep the New Sym box to be withing the given box
+ */
+void ScrollState::initNewSpotsSymbol (const SBox &box, uint16_t color)
+{
+    newsym_b.x = box.x + NEWSYM_DX;
+    newsym_b.y = box.y + NEWSYM_DY;
+    newsym_b.w = NEWSYM_W;
+    newsym_b.h = NEWSYM_H;
+
+    newsym_color = color;
+}
 
 
 
@@ -182,6 +233,13 @@ bool ScrollState::okToScrollDown (void) const
 bool ScrollState::okToScrollUp (void) const
 {
     return (nMoreAbove() > 0);
+}
+
+/* return whether the displayed rows are at the top most (newest) data entry
+ */
+bool ScrollState::atNewest (void) const
+{
+    return (n_data == 0 || top_vis == n_data-1);
 }
 
 

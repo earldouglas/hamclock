@@ -78,36 +78,32 @@ TouchType checkKBWarp (SCoord &s)
  */
 TouchType readCalTouch (SCoord &s)
 {
-    // fast return if none
-    if (!tft.touched())
-        return (TT_NONE);
+    TouchType tt = TT_NONE;
 
-    int mb;
-    while (tft.touched())
+    // drain to latest, if any
+    while (tft.touched()) {
+        int mb;
         tft.touchRead (&s.x, &s.y, &mb);
+        tt = mb == 1 ? TT_TAP : TT_TAP_BX;
+    }
 
-    TouchType tt = mb == 1 ? TT_TAP : TT_TAP_BX;
-
-    Serial.printf("Touch: \t%4d %4d\ttype %d\n", s.x, s.y, (int)tt);
+    if (tt != TT_NONE)
+        Serial.printf("Touch: \t%4d %4d\ttype %d\n", s.x, s.y, (int)tt);
 
     // return tap type
     return (tt);
 }
 
 
-/* wait for no touch events, need time also since the resistance film seems to be sticky
+/* drain pending touch and kb
  */
 void drainTouch()
 {
-    resetWatchdog();
-    uint32_t t0 = millis();
-    bool touched = false;
-    while (millis() - t0 < 100 || touched) {
-        if ((touched = tft.touched()) == true) {
-            uint16_t tx, ty;
-            tft.touchRead (&tx, &ty, NULL);
-        }
-    }
-    // Serial.println (F("Drain complete"));
-    resetWatchdog();
+    uint16_t tx, ty;
+    while (tft.touched())
+        tft.touchRead (&tx, &ty, NULL);
+
+    bool control, shift;
+    while (tft.getChar (&control, &shift) != CHAR_NONE)
+        continue;
 }

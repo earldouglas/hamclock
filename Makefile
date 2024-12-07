@@ -8,7 +8,7 @@
 .PHONY: clean clobber help
 
 # build flags common to all options and architectures
-CXXFLAGS = -IArduinoLib -IwsServer/include -I. -g -O2 -Wall -DARDUINO=100 -pthread -std=c++17
+CXXFLAGS = -IArduinoLib -IwsServer/include -I. -g -O3 -Wall -pthread -std=c++17
 # CXXFLAGS += -Wextra -pedantic -Werror -Wno-attributes -Wno-unknown-pragmas
 LDXXFLAGS = -LArduinoLib -LwsServer -g -pthread
 LIBS = -lpthread -larduino -lws
@@ -34,8 +34,8 @@ endif
 
 
 OBJS = \
-	UNIXHamClock.o \
 	BME280.o \
+	ESPHamClock.o \
 	Germano-Bold-16.o \
 	Germano-Bold-30.o \
 	Germano-Regular-16.o \
@@ -46,13 +46,18 @@ OBJS = \
 	astro.o \
 	blinker.o \
 	brightness.o \
+	cachefile.o \
+	callsign.o \
 	clocks.o \
 	cities.o \
 	color.o \
         contests.o \
+	cputemp.o \
+	drawextra.o \
 	dxcluster.o \
 	earthmap.o \
 	earthsat.o \
+	emetool.o \
 	favicon.o \
 	gimbal.o \
 	gpsd.o \
@@ -67,6 +72,7 @@ OBJS = \
 	moon_imgs.o \
 	moonpane.o \
 	ncdxf.o \
+	nmea.o \
 	nvram.o \
 	ontheair.o \
 	passwd.o \
@@ -75,6 +81,7 @@ OBJS = \
 	plotmgmnt.o \
 	prefixes.o \
 	pskreporter.o \
+	qrz.o \
 	radio.o \
 	robinson.o \
 	rss.o \
@@ -84,6 +91,7 @@ OBJS = \
 	sdo.o \
 	selectFont.o \
 	setup.o \
+	sevenseg.o \
 	spacewx.o \
 	sphere.o \
 	spots.o \
@@ -91,7 +99,9 @@ OBJS = \
 	string.o \
 	touch.o \
 	tz.o \
+	version.o \
 	webserver.o \
+	watchlist.o \
 	wifi.o \
 	wifimeter.o \
 	wx.o \
@@ -134,7 +144,6 @@ hamclock-800x480: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-1600x960: CXXFLAGS+=-D_USE_X11 -D_CLOCK_1600x960
@@ -143,7 +152,6 @@ hamclock-1600x960: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-2400x1440: CXXFLAGS+=-D_USE_X11 -D_CLOCK_2400x1440
@@ -152,7 +160,6 @@ hamclock-2400x1440: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-3200x1920: CXXFLAGS+=-D_USE_X11 -D_CLOCK_3200x1920
@@ -161,7 +168,6 @@ hamclock-3200x1920: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 
@@ -174,7 +180,6 @@ hamclock-web-800x480: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-web-1600x960: CXXFLAGS+=-D_WEB_ONLY -D_CLOCK_1600x960
@@ -182,7 +187,6 @@ hamclock-web-1600x960: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-web-2400x1440: CXXFLAGS+=-D_WEB_ONLY -D_CLOCK_2400x1440
@@ -190,7 +194,6 @@ hamclock-web-2400x1440: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-web-3200x1920: CXXFLAGS+=-D_WEB_ONLY -D_CLOCK_3200x1920
@@ -198,7 +201,6 @@ hamclock-web-3200x1920: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 
@@ -219,7 +221,6 @@ hamclock-fb0-800x480: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-fb0-1600x960: CXXFLAGS+=-D_USE_FB0 -D_CLOCK_1600x960
@@ -227,7 +228,6 @@ hamclock-fb0-1600x960: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-fb0-2400x1440: CXXFLAGS+=-D_USE_FB0 -D_CLOCK_2400x1440
@@ -235,7 +235,6 @@ hamclock-fb0-2400x1440: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
 hamclock-fb0-3200x1920: CXXFLAGS+=-D_USE_FB0 -D_CLOCK_3200x1920
@@ -243,15 +242,8 @@ hamclock-fb0-3200x1920: $(OBJS)
 	cd ArduinoLib && $(MAKE) libarduino.a "CXXFLAGS=$(CXXFLAGS)"
 	cd wsServer && $(MAKE) libws.a
 	$(CXX) $(LDXXFLAGS) $(OBJS) -o $@ $(LIBS)
-	rm -f UNIXHamClock.cpp
 
 
-
-# make UNIXHamClock.o from ESPHamClock.ino
-UNIXHamClock.o: ESPHamClock.ino
-	ln -s ESPHamClock.ino UNIXHamClock.cpp
-	$(CXX) $(CXXFLAGS)   -c -o UNIXHamClock.o UNIXHamClock.cpp
-	rm -f UNIXHamClock.cpp
 
 install:
 	@SOURCE=hamclock-*0x*0 ; \
@@ -271,4 +263,4 @@ clean clobber:
 	cd ArduinoLib && $(MAKE) clean
 	cd wsServer && $(MAKE) clean
 	touch x.o x.dSYM hamclock hamclock-
-	rm -rf *.o *.dSYM UNIXHamClock.cpp hamclock hamclock-*
+	rm -rf *.o *.dSYM hamclock hamclock-*

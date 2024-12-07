@@ -8,19 +8,18 @@
 #define CONTEST_COLOR   RGB565(205,91,69)       // X11 coral3
 #define TO_COLOR        RA8875_BLACK            // titles-only background
 #define TD_COLOR        CONTEST_COLOR           // titles-with-dates background
-#define CREDITS_Y0      31                      // dy of credits row
-#define START_DY        47                      // dy of first contest row
-#define CONTEST_DY      12                      // dy of each successive row
+#define CREDITS_Y0      SUBTITLE_Y0             // dy of credits row
+#define START_DY        LISTING_Y0              // dy of first contest row
+#define CONTEST_DY      12                      // dy of each successive row -- a bit tighter than LISTING_DY
 
 // NV_CONTESTS bits
 #define NVBIT_SHOWDATE  0x1                     // showing dates
 #define NVBIT_SHOWDETZ  0x2                     // showing DE time zone
 
 // URL to access info
-static const char contest_page[] PROGMEM = "/contests/contests311.txt";
+static const char contest_page[] = "/contests/contests311.txt";
 
 static ContestEntry *contests;                  // malloced list of ContestEntry
-static int max_contests;                        // max n contests we retain
 static char *credit;                            // malloced credit line
 static bool show_date;                          // whether to show 2nd line with date
 static bool show_detz;                          // whether to show dates in DE timezone
@@ -111,8 +110,8 @@ static void drawContestsPane (const SBox &box)
     }
 
     // draw scroll controls, if needed
-    cts_ss.drawScrollDownControl (box, CONTEST_COLOR);
-    cts_ss.drawScrollUpControl (box, CONTEST_COLOR);
+    cts_ss.drawScrollDownControl (box, CONTEST_COLOR, CONTEST_COLOR);
+    cts_ss.drawScrollUpControl (box, CONTEST_COLOR, CONTEST_COLOR);
 }
 
 /* scroll up, if appropriate to do so now.
@@ -145,8 +144,8 @@ static void formatTimeLine (const SBox &box, time_t t1, time_t t2, char str[], s
         // DE timezone uses AM PM notation
 
         // break out in DE timezone
-        t1 += de_tz.tz_secs;
-        t2 += de_tz.tz_secs;
+        t1 += getTZ (de_tz);
+        t2 += getTZ (de_tz);
         struct tm tm1 = *gmtime (&t1);
         struct tm tm2 = *gmtime (&t2);
 
@@ -225,13 +224,15 @@ static bool runContestMenu (const SCoord &s, const SBox &box)
 
     // decide which contest s is pointing at, if any
     ContestEntry *cep = NULL;
-    int display_i = (s.y - box.y - START_DY)/CONTEST_DY;
-    if (show_date)
-        display_i /= 2;
-    int data_i;
-    if (cts_ss.findDataIndex (display_i, data_i))
-        cep = &contests[data_i];
-    // printf ("****************** %s\n", cep ? cep->title : "NONE");
+    if (s.y >= box.y + START_DY) {
+        int display_i = (s.y - box.y - START_DY)/CONTEST_DY;
+        if (show_date)
+            display_i /= 2;
+        int data_i;
+        if (cts_ss.findDataIndex (display_i, data_i))
+            cep = &contests[data_i];
+        // printf ("****************** %d %d %d %d %s\n", s.y, box.y, display_i, data_i, cep ? cep->title : "NONE");
+    }
 
     // prepare menu
     const int indent = 2;
@@ -240,26 +241,27 @@ static bool runContestMenu (const SCoord &s, const SBox &box)
     AlarmState a_s;
     time_t a_t;
     bool a_utc;
-    char a_str[100];
-    getOneTimeAlarmState (a_s, a_t, a_utc, a_str, sizeof(a_str));
+    getOneTimeAlarmState (a_s, a_t, a_utc);
     bool starts_in_future = cep && cep->start_t > nowWO();
     bool alarm_is_set = cep && a_s == ALMS_ARMED && a_t == cep->start_t && starts_in_future;
-    MenuFieldType alarm_mft = starts_in_future ? MENU_TOGGLE : MENU_IGNORE;
-    MenuFieldType showdetz_mft = show_date ? MENU_TOGGLE : MENU_IGNORE;
 
-    // build a version of the title that fits well within box
+    // build a version of the contest name that fits well within box
     const uint16_t menu_gap = 20;
-    char title[50];
-    snprintf (title, sizeof(title), "%s", cep ? cep->title : "");
-    for (uint16_t t_l = getTextWidth(title); t_l > box.w-2*menu_gap; t_l = getTextWidth(title)) {
+    char cname[50];
+    quietStrncpy (cname, cep ? cep->title : "", sizeof(cname));
+    for (uint16_t t_l = getTextWidth(cname); t_l > box.w-2*menu_gap; t_l = getTextWidth(cname)) {
         // try to chop at blank, else just be ruthless
-        char *r_space = strrchr (title, ' ');
+        char *r_space = strrchr (cname, ' ');
         if (r_space)
             *r_space = '\0';
         else
-            title[strlen(title)-1] = '\0';
+            cname[strlen(cname)-1] = '\0';
     }
+
+    // decide which menu items to show
     MenuFieldType title_mft = cep ? MENU_LABEL : MENU_IGNORE;
+    MenuFieldType alarm_mft = cep && starts_in_future ? MENU_TOGGLE : MENU_IGNORE;
+    MenuFieldType showdtz_mft = cep ? MENU_IGNORE : MENU_TOGGLE;
 
 #if defined(_USE_FB0)
     MenuFieldType web_mft = MENU_IGNORE;
@@ -267,14 +269,17 @@ static bool runContestMenu (const SCoord &s, const SBox &box)
     MenuFieldType web_mft = cep ? MENU_TOGGLE : MENU_IGNORE;
 #endif
 
+
+    // build menu
     MenuItem mitems[] = {
-        {title_mft,    false,         0, indent, title},                        // 0
-        {MENU_TOGGLE,  show_date,     1, indent, "Show dates"},                 // 1
-        {showdetz_mft, show_detz,     2, indent, "Show in DE TZ"},              // 2
+        {title_mft,    false,         0, indent, cname},                        // 0
+        {showdtz_mft,  show_date,     1, indent, "Show dates"},                 // 1
+        {showdtz_mft,  show_detz,     2, indent, "Use DE TZ"},                  // 2
         {alarm_mft,    alarm_is_set,  3, indent, "Set alarm"},                  // 3
         {web_mft,      false,         4, indent, "Show web page"},              // 4
     };
     const int n_mi = NARRAY(mitems);
+
 
     // boxes
     const uint16_t menu_x = box.x + menu_gap;
@@ -285,7 +290,7 @@ static bool runContestMenu (const SCoord &s, const SBox &box)
     SBox ok_b;
 
     // run
-    MenuInfo menu = {menu_b, ok_b, true, false, 1, n_mi, mitems};
+    MenuInfo menu = {menu_b, ok_b, UF_CLOCKSOK, M_CANCELOK, 1, n_mi, mitems};
     if (runMenu (menu)) {
 
         // check for show_date change
@@ -339,7 +344,7 @@ static bool retrieveContests (const SBox &box)
         updateClocks(false);
 
         // fetch page and skip header
-        httpHCPGET (ctst_client, backend_host, contest_page);
+        httpHCGET (ctst_client, backend_host, contest_page);
         if (!httpSkipHeader (ctst_client)) {
             Serial.print (F("CTS: failed\n"));
             goto out;
@@ -361,7 +366,6 @@ static bool retrieveContests (const SBox &box)
         cts_ss.init ((box.h - START_DY)/CONTEST_DY, 0, 0);      // max_vis, top_vis, n_data
         if (show_date)
             cts_ss.max_vis /= 2;
-        max_contests = cts_ss.max_vis + nMoreScrollRows();      // "nRows" really means n contests
 
         // contests consist of 2 lines each
         char line1[100], line2[100];
@@ -380,8 +384,7 @@ static bool retrieveContests (const SBox &box)
         selectFontStyle (LIGHT_FONT, FAST_FONT);
 
         // read 2 lines per contest: info and url
-        while (cts_ss.n_data < max_contests
-                                        && getTCPLine (ctst_client, line1, sizeof(line1), NULL)
+        while (getTCPLine (ctst_client, line1, sizeof(line1), NULL)
                                         && getTCPLine (ctst_client, line2, sizeof(line2), NULL)) {
             // Serial.printf (_FX("CTS line %d: %s\n%s\n"), cts_ss.n_data, line1, line2);
 
